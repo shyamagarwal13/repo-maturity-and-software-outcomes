@@ -1,0 +1,41 @@
+{
+  "tool_name": "openhands",
+  "config_folders": [".openhands/"],
+  "root_files": [],
+  "artifact_patterns": [
+    {
+      "pattern": ".openhands/microagents/repo.md",
+      "type": "file",
+      "description": "General repository microagent providing guidelines for OpenHands to work effectively with the repository",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "microagents",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".openhands/microagents/repo.md",
+      "recursive": false,
+      "notes": [
+        "Always loaded as part of the context"
+      ]
+    },
+    {
+      "pattern": ".openhands/microagents/*.md",
+      "type": "directory",
+      "description": "Custom microagents with specific instructions for different tasks or workflows",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "microagents",
+      "scope": "project",
+      "discovery_method": "glob",
+      "glob_pattern": ".openhands/microagents/**/*.md",
+      "path_prefix": ".openhands/microagents/",
+      "recursive": true,
+      "notes": [
+        "Naming: <microagent_name>.md files",
+        "Use cases: Trigger-based microagents for specific scenarios"
+      ]
+    }
+  ]
+}

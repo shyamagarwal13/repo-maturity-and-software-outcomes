@@ -1,0 +1,26 @@
+{
+  "tool_name": "openai-codex",
+  "description": "OpenAI Codex CLI uses shared AGENTS.md and AGENTS.override.md artifacts (see shared-artifacts.json)",
+  "config_folders": [".codex/"],
+  "root_files": ["AGENTS.md"],
+  "artifact_patterns": [
+    {
+      "pattern": "config.toml",
+      "type": "file",
+      "description": "Project-level configuration for OpenAI Codex CLI behavior, model settings, and preferences",
+      "file_type": "toml",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "configuration",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": "config.toml",
+      "recursive": false,
+      "notes": [
+        "Project root",
+        "TOML format configuration",
+        "Settings for model, API, and CLI behavior"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,82 @@
+{
+  "tool_name": "github-copilot",
+  "description": "GitHub Copilot artifacts for VS Code, JetBrains IDEs, and CLI",
+  "config_folders": [".github/", ".copilot/"],
+  "root_files": ["copilot-instructions.md"],
+  "artifact_patterns": [
+    {
+      "pattern": ".github/copilot-instructions.md",
+      "type": "file",
+      "description": "Repository-wide custom instructions for all Copilot requests",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "instructions",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".github/copilot-instructions.md",
+      "recursive": false,
+      "notes": [
+        "Applies across entire repository",
+        "Markdown format"
+      ]
+    },
+    {
+      "pattern": ".github/instructions/*.instructions.md",
+      "type": "directory",
+      "description": "Path-specific custom instructions with glob pattern matching",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "instructions",
+      "scope": "project",
+      "discovery_method": "glob",
+      "glob_pattern": ".github/instructions/**/*.instructions.md",
+      "path_prefix": ".github/instructions/",
+      "recursive": true,
+      "notes": [
+        "Markdown with YAML frontmatter",
+        "Frontmatter properties: applyTo (glob patterns), excludeAgent (optional: code-review or coding-agent)",
+        "Scoped to specific file patterns via applyTo property"
+      ]
+    },
+    {
+      "pattern": ".github/prompts/*.prompt.md",
+      "type": "directory",
+      "description": "Reusable prompt templates for VS Code and JetBrains",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "prompts",
+      "scope": "project",
+      "discovery_method": "glob",
+      "glob_pattern": ".github/prompts/**/*.prompt.md",
+      "path_prefix": ".github/prompts/",
+      "recursive": true,
+      "notes": [
+        "Requires chat.promptFiles: true in workspace settings",
+        ".prompt.md extension required"
+      ]
+    },
+    {
+      "pattern": ".github/agents/*.md",
+      "type": "directory",
+      "description": "Custom agent configurations defining specialized agent behaviors",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "agents",
+      "scope": "project",
+      "discovery_method": "glob",
+      "glob_pattern": ".github/agents/**/*.md",
+      "path_prefix": ".github/agents/",
+      "recursive": true,
+      "notes": [
+        "Markdown with YAML frontmatter",
+        "Frontmatter properties: name, description (required), target, tools, metadata",
+        "File extensions: .md or .agent.md",
+        "Repository-level agents cannot configure MCP servers"
+      ]
+    }
+  ]
+}

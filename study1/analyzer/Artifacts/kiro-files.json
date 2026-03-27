@@ -1,0 +1,111 @@
+{
+  "tool_name": "kiro",
+  "config_folders": [".kiro/"],
+  "root_files": [],
+  "artifact_patterns": [
+    {
+      "pattern": ".kiro/steering/*.md",
+      "type": "directory",
+      "description": "Project-specific steering files to guide Kiro's behavior, coding standards, and context",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "steering",
+      "scope": "project",
+      "discovery_method": "glob",
+      "glob_pattern": ".kiro/steering/**/*.md",
+      "path_prefix": ".kiro/steering/",
+      "recursive": true,
+      "notes": [
+        "Markdown with YAML front matter",
+        "Front matter properties: inclusion (always/fileMatch/manual), fileMatchPattern (glob patterns)",
+        "Inclusion modes: always (auto-loaded), fileMatch (conditional), manual (on-demand via #steering-file-name)"
+      ]
+    },
+    {
+      "pattern": ".kiro/steering/product.md",
+      "type": "file",
+      "description": "Foundation file defining product purpose, target users, key features, business objectives",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "steering",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".kiro/steering/product.md",
+      "recursive": false,
+      "notes": [
+        "Auto-generated foundation file"
+      ]
+    },
+    {
+      "pattern": ".kiro/steering/tech.md",
+      "type": "file",
+      "description": "Foundation file documenting frameworks, libraries, development tools, technical constraints",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "steering",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".kiro/steering/tech.md",
+      "recursive": false,
+      "notes": [
+        "Auto-generated foundation file"
+      ]
+    },
+    {
+      "pattern": ".kiro/steering/structure.md",
+      "type": "file",
+      "description": "Foundation file outlining file organization, naming conventions, import patterns, architectural decisions",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "steering",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".kiro/steering/structure.md",
+      "recursive": false,
+      "notes": [
+        "Auto-generated foundation file"
+      ]
+    },
+    {
+      "pattern": ".kiro/hooks/*.hook",
+      "type": "directory",
+      "description": "Agent hooks for automated triggers executing predefined agent actions on specific events",
+      "file_type": "json",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "hooks",
+      "scope": "project",
+      "discovery_method": "glob",
+      "glob_pattern": ".kiro/hooks/**/*.hook",
+      "path_prefix": ".kiro/hooks/",
+      "recursive": true,
+      "notes": [
+        "JSON configuration files with .hook extension",
+        "Event types: File save, file create, file delete, commit-related events",
+        "Configuration properties: Pattern (file matching), action (AI-powered instructions), trigger type",
+        "Use cases: Generate documentation, create/update unit tests, optimize code performance",
+        "Can be version-controlled and shared with team"
+      ]
+    },
+    {
+      "pattern": ".kiro/config.json",
+      "type": "file",
+      "description": "Workspace configuration including hook definitions",
+      "file_type": "json",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "configuration",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".kiro/config.json",
+      "recursive": false,
+      "notes": [
+        "Properties: beforeCommit (hook arrays), other configuration options"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,136 @@
+{
+  "tool_name": "claude-code",
+  "config_folders": [".claude/"],
+  "root_files": ["CLAUDE.md"],
+  "artifact_patterns": [
+    {
+      "pattern": ".claude/settings.json",
+      "type": "file",
+      "description": "Project-level settings checked into source control and shared with team",
+      "file_type": "json",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "configuration",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".claude/settings.json",
+      "recursive": false,
+      "notes": [
+        "Key settings: permissions, model, env, apiKeyHelper, companyAnnouncements, hooks, sandbox, extraKnownMarketplaces"
+      ]
+    },
+    {
+      "pattern": ".claude/settings.local.json",
+      "type": "file",
+      "description": "Personal project preferences not committed to version control",
+      "file_type": "json",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "configuration",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".claude/settings.local.json",
+      "recursive": false,
+      "notes": [
+        "Project-level (local)",
+        "Git-ignored for personal experimentation"
+      ]
+    },
+    {
+      "pattern": "CLAUDE.md",
+      "type": "file",
+      "description": "Project-specific instructions and context automatically loaded at startup",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "instructions",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": "CLAUDE.md",
+      "recursive": false,
+      "notes": [
+        "Project root or any directory",
+        "Content: Repository etiquette, developer environment setup, project-specific behaviors",
+        "No required format; keep concise and human-readable"
+      ]
+    },
+    {
+      "pattern": ".claude/commands/*.md",
+      "type": "directory",
+      "description": "Custom slash commands for frequently-used prompts",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "commands",
+      "scope": "project",
+      "discovery_method": "glob",
+      "glob_pattern": ".claude/commands/**/*.md",
+      "path_prefix": ".claude/commands/",
+      "recursive": true,
+      "notes": [
+        "Supports subdirectories for namespacing",
+        "Markdown with YAML frontmatter",
+        "Frontmatter properties: description, allowed-tools, model, argument-hint, disable-model-invocation",
+        "Argument handling: $ARGUMENTS (all args), $1, $2, etc. (positional args)",
+        "Advanced features: Bash execution (! prefix), file references (@ prefix)",
+        "Shared with team"
+      ]
+    },
+    {
+      "pattern": ".claude/agents/*.md",
+      "type": "directory",
+      "description": "Project-specific subagents with specialized roles",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "agents",
+      "scope": "project",
+      "discovery_method": "glob",
+      "glob_pattern": ".claude/agents/**/*.md",
+      "path_prefix": ".claude/agents/",
+      "recursive": true,
+      "notes": [
+        "Markdown with YAML frontmatter",
+        "Frontmatter properties: name, description, tools (comma-separated or omit to inherit all), model (sonnet/opus/haiku/inherit)",
+        "Capabilities: Separate conversation history, context isolation, intelligent routing by coordinator",
+        "Enables multi-agent orchestration with coordinator model routing requests to specialized subagents"
+      ]
+    },
+    {
+      "pattern": ".claude/skills/*.md",
+      "type": "directory",
+      "description": "Reusable skill definitions that teach Claude domain-specific techniques and capabilities",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "skills",
+      "scope": "project",
+      "discovery_method": "glob",
+      "glob_pattern": ".claude/skills/**/*.md",
+      "path_prefix": ".claude/skills/",
+      "recursive": true,
+      "notes": [
+        "Supports subdirectories for organizing skills by domain",
+        "Markdown with YAML frontmatter",
+        "Long-form how-to guides with trigger conditions, step-by-step methodology, and validation criteria",
+        "Shared with team"
+      ]
+    },
+    {
+      "pattern": ".claude/.mcp.json",
+      "type": "file",
+      "description": "MCP (Model Context Protocol) server definitions for project",
+      "file_type": "json",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "configuration",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".claude/.mcp.json",
+      "recursive": false,
+      "notes": [
+        "Project-level MCP server configuration"
+      ]
+    }
+  ]
+}

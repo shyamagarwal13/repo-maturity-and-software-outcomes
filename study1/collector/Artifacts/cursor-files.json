@@ -1,0 +1,45 @@
+{
+  "tool_name": "cursor",
+  "config_folders": [".cursor/"],
+  "root_files": [".cursorrules"],
+  "artifact_patterns": [
+    {
+      "pattern": ".cursor/rules/*.mdc",
+      "type": "directory",
+      "description": "Version-controlled project rules for AI behavior customization",
+      "file_type": "mdc",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "rules",
+      "scope": "project",
+      "discovery_method": "glob",
+      "glob_pattern": ".cursor/rules/**/*.mdc",
+      "path_prefix": ".cursor/rules/",
+      "recursive": true,
+      "notes": [
+        "MDC format: Markdown with YAML frontmatter metadata",
+        "Metadata properties: description, globs, alwaysApply",
+        "Rule types: Always Apply, Apply Intelligently, Apply to Specific Files, Apply Manually (via @-mentions)",
+        "Recommended approach, replaces deprecated .cursorrules"
+      ]
+    },
+    {
+      "pattern": ".cursorrules",
+      "type": "file",
+      "description": "Legacy project-wide AI rules configuration",
+      "file_type": "text",
+      "status": "deprecated",
+      "is_standard": true,
+      "artifact_category": "rules",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".cursorrules",
+      "recursive": false,
+      "notes": [
+        "Plain text/Markdown format",
+        "Located at project root",
+        "Deprecated, migration to .cursor/rules/*.mdc recommended"
+      ]
+    }
+  ]
+}

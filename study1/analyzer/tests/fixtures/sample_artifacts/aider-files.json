@@ -1,0 +1,62 @@
+{
+  "tool_name": "aider",
+  "artifact_patterns": [
+    {
+      "pattern": ".aider.conf.yml",
+      "type": "file",
+      "description": "Configure Aider behavior, models, API settings, git integration, file handling, testing",
+      "file_type": "yaml",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "configuration",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".aider.conf.yml",
+      "recursive": false,
+      "notes": [
+        "Home directory, git repository root, or current directory",
+        "Can be user-level (home) or project-level (git root/current dir)",
+        "Priority: Files loaded in order: home → git root → current directory (last takes precedence)",
+        "Key sections: Model settings, API keys (OpenAI/Anthropic only), git integration, output/display, repository mapping, file handling, chat/history, testing/linting, voice features",
+        "File must use .yml extension (.yaml not recognized)"
+      ]
+    },
+    {
+      "pattern": ".aiderignore",
+      "type": "file",
+      "description": "Specify files and directories Aider should ignore",
+      "file_type": "text",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "configuration",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".aiderignore",
+      "recursive": false,
+      "notes": [
+        "Git repository root (default) or configurable location",
+        "Similar to .gitignore syntax",
+        "Location customizable via aiderignore option in .aider.conf.yml"
+      ]
+    },
+    {
+      "pattern": ".env",
+      "type": "file",
+      "description": "Store LLM API keys for all providers",
+      "file_type": "text",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "configuration",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".env",
+      "recursive": false,
+      "notes": [
+        "Repository root",
+        "Environment variables format",
+        "Format: AIDER_xxx=value or provider-specific key variables",
+        "Recommended for API key storage over YAML config"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,97 @@
+{
+  "tool_name": "gemini-cli",
+  "config_folders": [".gemini/"],
+  "root_files": ["GEMINI.md"],
+  "artifact_patterns": [
+    {
+      "pattern": "GEMINI.md",
+      "type": "file",
+      "description": "Context files providing persistent project-specific instructions, coding styles, and background information",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "context",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": "GEMINI.md",
+      "recursive": false,
+      "notes": [
+        "Project root, subdirectories",
+        "Hierarchical loading: Global → Project root → Ancestors → Local subdirectories",
+        "Supports file imports via @path/to/file.md syntax",
+        "Commands: /memory refresh to reload, /memory show to display"
+      ]
+    },
+    {
+      "pattern": ".gemini/settings.json",
+      "type": "file",
+      "description": "Project-specific configuration for models, tools, UI, context loading, privacy",
+      "file_type": "json",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "configuration",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".gemini/settings.json",
+      "recursive": false,
+      "notes": [
+        "Project root",
+        "Key sections: General, UI, Model, Context, Tools, MCP, Privacy & Security",
+        "Schema: https://raw.githubusercontent.com/google-gemini/gemini-cli/main/schemas/settings.schema.json"
+      ]
+    },
+    {
+      "pattern": ".geminiignore",
+      "type": "file",
+      "description": "Specify files to exclude from context discovery",
+      "file_type": "text",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "configuration",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".geminiignore",
+      "recursive": false,
+      "notes": [
+        "Project root or subdirectories",
+        "Similar to .gitignore syntax",
+        "Controlled by fileFiltering.respectGeminiIgnore setting (default: true)"
+      ]
+    },
+    {
+      "pattern": ".gemini/sandbox-custom.sb",
+      "type": "file",
+      "description": "Custom sandbox configurations for tool execution isolation",
+      "file_type": "sb",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "configuration",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".gemini/sandbox-custom.sb",
+      "recursive": false,
+      "notes": [
+        "Sandbox profile format",
+        "Platform-specific: .gemini/sandbox-darwin-custom.sb, .gemini/sandbox-linux-custom.sb",
+        "Referenced via sandbox setting in settings.json"
+      ]
+    },
+    {
+      "pattern": ".gemini/sandbox.Dockerfile",
+      "type": "file",
+      "description": "Custom sandbox configurations using Dockerfile",
+      "file_type": "dockerfile",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "configuration",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".gemini/sandbox.Dockerfile",
+      "recursive": false,
+      "notes": [
+        "Dockerfile format for sandbox configuration",
+        "Referenced via sandbox setting in settings.json"
+      ]
+    }
+  ]
+}

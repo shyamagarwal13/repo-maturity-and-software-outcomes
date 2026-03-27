@@ -1,0 +1,92 @@
+{
+  "tool_name": "google-idx",
+  "config_folders": [".idx/", ".gemini/"],
+  "root_files": ["GEMINI.md"],
+  "artifact_patterns": [
+    {
+      "pattern": ".idx/airules.md",
+      "type": "file",
+      "description": "Primary rules file for Gemini in Firebase chat; provides project-specific instructions, coding standards, persona definitions",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "rules",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".idx/airules.md",
+      "recursive": false,
+      "notes": [
+        "Highest priority for Gemini in Firebase chat"
+      ]
+    },
+    {
+      "pattern": "GEMINI.md",
+      "type": "file",
+      "description": "Rules file for Gemini CLI; fallback for Gemini in Firebase if .idx/airules.md doesn't exist",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "rules",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": "GEMINI.md",
+      "recursive": false,
+      "notes": [
+        "Project root",
+        "Content: Project standards, coding style, persona definitions, technology preferences"
+      ]
+    },
+    {
+      "pattern": ".gemini/styleguide.md",
+      "type": "file",
+      "description": "Alternative rules file (lower precedence than airules.md and GEMINI.md)",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "rules",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".gemini/styleguide.md",
+      "recursive": false,
+      "notes": [
+        "Lower precedence in rules hierarchy"
+      ]
+    },
+    {
+      "pattern": ".aiexclude",
+      "type": "file",
+      "description": "Control which files are hidden from Gemini (prevents indexing, chat assistance, code completion, inline editing)",
+      "file_type": "text",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "configuration",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".aiexclude",
+      "recursive": false,
+      "notes": [
+        "Any directory level",
+        "Similar to .gitignore syntax, with limitations",
+        "No negation patterns (! prefix not supported)",
+        "Empty file blocks all files in directory"
+      ]
+    },
+    {
+      "pattern": ".idx/dev.nix",
+      "type": "file",
+      "description": "Workspace environment configuration (packages, extensions, environment variables, lifecycle hooks, preview configuration)",
+      "file_type": "nix",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "configuration",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".idx/dev.nix",
+      "recursive": false,
+      "notes": [
+        "Nix language format",
+        "Options: packages, channel, env, idx.extensions, idx.workspace.onCreate, idx.workspace.onStart, idx.previews, services"
+      ]
+    }
+  ]
+}

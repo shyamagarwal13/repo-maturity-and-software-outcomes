@@ -1,0 +1,67 @@
+# ============================================================================
+# Pipeline Configuration — AI Artifact Data Collection
+# ============================================================================
+# Copy this file to config.yaml and adjust values for your study.
+# ============================================================================
+
+embedding:
+  # Number of texts to encode in a single batch. Higher values use more
+  # memory but are faster. Reduce if you hit OOM errors on CPU/GPU.
+  # Range: 1–128. Default: 32.
+  batch_size: 32
+
+  # Memory budget in GiB for adaptive batch size estimation. Lower values
+  # reduce peak memory usage but may slow encoding. Default: 2.
+  # memory_budget_gib: 2
+
+git:
+  # Timeout in seconds for git clone and pull operations.
+  # Increase for large repos or slow networks. Default: 300.
+  # timeout: 300
+
+  # Timeout in seconds for git log, rev-list, and shortlog commands.
+  # Increase for repos with very long history. Default: 60.
+  # log_timeout: 60
+
+temporal:
+  # Start of the git history window (ISO 8601 date). Commits before this
+  # date are excluded from temporal analysis.
+  start_date: "2020-01-01"
+
+  # Study cutoff date (ISO 8601). Controls two things:
+  #   1. Repository state — the repo is reset to the last commit on or
+  #      before this date, so artifact discovery reflects the codebase as
+  #      it looked at the cutoff.
+  #   2. Temporal analysis — only commits within start_date..end_date are
+  #      included in timeseries and aggregated statistics.
+  # Omit or set to null to use today's date (no reset, latest state).
+  # end_date: "2025-12-31"
+
+author:
+  # Privacy strategy for author identities:
+  #   "obfuscate"  — SHA-256 hash with per-repo random salt (default)
+  #   "anonymize"  — HMAC-SHA-256; requires the "secret" field below to be set
+  strategy: "anonymize"
+
+  # Shared secret for HMAC-SHA-256 anonymization. Required when strategy
+  # is "anonymize". Ignored for "obfuscate".
+  secret: "set-locally-before-use"
+
+  # Number of hex characters to keep from the anonymized hash.
+  # Only used when strategy is "anonymize". Default: 12.
+  hash_length: 12
+
+  # Prefix prepended to anonymized author identifiers (e.g., "user-a1b2c3").
+  # Only used when strategy is "anonymize". Default: "user-".
+  prefix: "user-"
+
+paths:
+  # Directory where collection output bundles are written.
+  # Supports {organisation} placeholder, replaced at runtime.
+  # Default: output/{organisation}
+  # output_dir: "output/{organisation}"
+
+  # Directory where repositories are cloned for analysis.
+  # Supports {organisation} placeholder.
+  # Default: ../analyzed_repos/{organisation}
+  # clone_dir: "../analyzed_repos/{organisation}"

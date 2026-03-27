@@ -1,0 +1,44 @@
+{
+  "tool_name": "jetbrains-ai",
+  "config_folders": [".junie/"],
+  "root_files": ["guidelines.md"],
+  "artifact_patterns": [
+    {
+      "pattern": ".aiignore",
+      "type": "file",
+      "description": "Restrict AI Assistant from processing specific files or folders",
+      "file_type": "text",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "configuration",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".aiignore",
+      "recursive": false,
+      "notes": [
+        "Project root",
+        "Same syntax as .gitignore",
+        "Alternative files also supported: .cursorignore, .codeiumignore, .aiexclude"
+      ]
+    },
+    {
+      "pattern": ".junie/guidelines.md",
+      "type": "file",
+      "description": "Define coding standards, technology specifications, and best practices for Junie AI agent",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "guidelines",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".junie/guidelines.md",
+      "recursive": false,
+      "notes": [
+        "Project root directory",
+        "Version-controlled",
+        "Content types: Technology specifications, code standards, naming conventions, code examples, anti-patterns",
+        "Creation: Manual editing or automated generation via Junie"
+      ]
+    }
+  ]
+}

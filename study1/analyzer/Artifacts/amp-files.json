@@ -1,0 +1,27 @@
+{
+  "tool_name": "amp",
+  "config_folders": [".amp/"],
+  "root_files": [],
+  "artifact_patterns": [
+    {
+      "pattern": ".agents/commands/*.md",
+      "type": "directory",
+      "description": "Custom command definitions for reusable prompts and automated workflows",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "commands",
+      "scope": "project",
+      "discovery_method": "glob",
+      "glob_pattern": ".agents/commands/**/*.md",
+      "path_prefix": ".agents/commands/",
+      "recursive": true,
+      "notes": [
+        "Workspace root",
+        "Markdown or executable files",
+        "Command output appended to prompt input; executables receive max 50k character output",
+        "Access via Amp Command Palette (Cmd/Alt-Shift-A in editors, Ctrl-O in CLI)"
+      ]
+    }
+  ]
+}

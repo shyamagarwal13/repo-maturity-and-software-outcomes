@@ -1,0 +1,63 @@
+{
+  "tool_name": "windsurf",
+  "config_folders": [".windsurf/"],
+  "root_files": [".windsurfrules"],
+  "artifact_patterns": [
+    {
+      "pattern": ".windsurf/rules/*.md",
+      "type": "directory",
+      "description": "Workspace-specific rules to guide Cascade AI behavior",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "rules",
+      "scope": "project",
+      "discovery_method": "glob",
+      "glob_pattern": ".windsurf/rules/**/*.md",
+      "path_prefix": ".windsurf/rules/",
+      "recursive": true,
+      "notes": [
+        "Discovered from workspace, subdirectories, and up to git root",
+        "Character limit: 12,000 characters per file",
+        "Activation modes: Manual (@mention), Always On, Model Decision, Glob pattern matching"
+      ]
+    },
+    {
+      "pattern": ".windsurfrules",
+      "type": "file",
+      "description": "Legacy/alternative rules file (community pattern)",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "rules",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": ".windsurfrules",
+      "recursive": false,
+      "notes": [
+        "Community-adopted pattern (not officially documented but widely used)",
+        "Located at project root"
+      ]
+    },
+    {
+      "pattern": ".windsurf/workflows/*.md",
+      "type": "directory",
+      "description": "Repeatable automated task sequences for Cascade agent",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "workflows",
+      "scope": "project",
+      "discovery_method": "glob",
+      "glob_pattern": ".windsurf/workflows/**/*.md",
+      "path_prefix": ".windsurf/workflows/",
+      "recursive": true,
+      "notes": [
+        "Character limit: 12,000 characters per file",
+        "Invocation: Slash command format /[workflow-name]",
+        "Supports nested workflow calls",
+        "Use cases: deployment, testing, formatting, dependency management"
+      ]
+    }
+  ]
+}
