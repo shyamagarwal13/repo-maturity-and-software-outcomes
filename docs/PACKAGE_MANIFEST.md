@@ -5,7 +5,7 @@
 - `README.md`: package overview for anonymous review
 - `LICENSE_NOTE.md`: licensing and redistribution note for this local review build
 - `study1/`: merged materials for Study 1
-- `study2_placeholder/`: placeholder for Study 2 materials
+- `study2/`: replication materials for Study 2
 - `data/`: directories for public inputs, anonymized outputs, and omission notes
 - `docs/`: package manifest and sanitization record
 
