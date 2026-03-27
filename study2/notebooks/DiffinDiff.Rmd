@@ -1,0 +1,3146 @@
+---
+title: "Control Group Analysis: Repositories without prior AI traces (AF) vs Repositories with prior AI traces (IF)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+knitr::opts_chunk$set(dev = 'CairoPNG', dpi = 150)
+options(bitmapType = 'cairo')
+utils::globalVariables(c(
+    "estimate", "is_significant", "conf.low", "conf.high",
+    "term", "setting", "outcome", "outcome_label", "time"
+))
+```
+
+## Loading Required Packages
+
+```{r load_packages}
+library(didimputation)
+library(ggplot2)
+library(dplyr)
+library(data.table)
+library(knitr)
+library(kableExtra)
+library(Cairo)
+```
+
+## Loading and Preparing the Data
+
+```{r load_data}
+# Create output directories if they don't exist
+if (!dir.exists("../results")) {
+    dir.create("../results", recursive = TRUE)
+    cat("Created results directory\n")
+}
+if (!dir.exists("../plots")) {
+    dir.create("../plots", recursive = TRUE)
+    cat("Created plots directory\n")
+}
+
+panel_data <- fread("../data/panel_event_monthly.csv")
+
+# Convert variables to DiD required format
+# Keep original repo names (strings) for mapping
+panel_data$repo_name_str <- panel_data$repo_name
+panel_data$repo_name <- as.numeric(factor(panel_data$repo_name))
+
+panel_data$time <- as.numeric(gsub("-", "", panel_data$time))
+panel_data$event[!is.na(panel_data$event)] <- as.numeric(
+    gsub("-", "", panel_data$event[!is.na(panel_data$event)]))
+panel_data$event[is.na(panel_data$event)] <- 0
+# panel_data <- panel_data[panel_data$event < 202401 # never treated
+#         | (panel_data$event > 202407 & panel_data$event <= 202503)]
+panel_data$event <- as.integer(panel_data$event)
+panel_data$quality_warnings <- panel_data$code_smells + panel_data$vulnerabilities + panel_data$bugs
+
+# Create delta metrics before log transformation
+# First, sort data and compute changes from previous time point
+panel_data <- panel_data %>%
+    arrange(repo_name, time) %>%
+    group_by(repo_name) %>%
+    mutate(
+        # Compute changes from previous time point
+        delta_code_smells = code_smells - lag(code_smells, default = 0),
+        delta_vulnerabilities = vulnerabilities - lag(vulnerabilities, default = 0),
+        delta_bugs = bugs - lag(bugs, default = 0),
+
+        # Compute delta per line added (avoid division by zero)
+        code_smells_per_line = delta_code_smells / (lines_added + 1),
+        vulnerabilities_per_line = delta_vulnerabilities / (lines_added + 1),
+        bugs_per_line = delta_bugs / (lines_added + 1)
+    ) %>%
+    ungroup()
+
+# Log transform skewed variables
+panel_data$commits <- log(panel_data$commits + 1)
+panel_data$lines_added <- log(panel_data$lines_added + 1)
+panel_data$code_smells <- log(panel_data$code_smells + 1)
+panel_data$vulnerabilities <- log(panel_data$vulnerabilities + 1)
+panel_data$bugs <- log(panel_data$bugs + 1)
+panel_data$cognitive_complexity <- log(panel_data$cognitive_complexity + 1)
+panel_data$duplicated_lines_density <- log(panel_data$duplicated_lines_density + 1)
+panel_data$comment_lines_density <- log(panel_data$comment_lines_density + 1)
+panel_data$age <- log(panel_data$age + 1)
+panel_data$contributors <- log(panel_data$contributors + 1)
+panel_data$stars <- log(panel_data$stars + 1)
+panel_data$issues <- log(panel_data$issues + 1)
+panel_data$issue_comments <- log(panel_data$issue_comments + 1)
+panel_data$quality_warnings <- log(panel_data$quality_warnings + 1)
+
+# Handle delta metrics transformation (can be negative, so use signed log)
+# Use signed log transformation: sign(x) * log(|x| + 1)
+panel_data$code_smells_per_line <- sign(panel_data$code_smells_per_line) * log(abs(panel_data$code_smells_per_line) + 1)
+panel_data$vulnerabilities_per_line <- sign(panel_data$vulnerabilities_per_line) * log(abs(panel_data$vulnerabilities_per_line) + 1)
+panel_data$bugs_per_line <- sign(panel_data$bugs_per_line) * log(abs(panel_data$bugs_per_line) + 1)
+
+# Create treatment indicator and time since treatment variables
+panel_data$treated <- ifelse(panel_data$event > 0, 1, 0)
+panel_data$time_since_treatment <- ifelse(panel_data$treated == 1,
+                                         panel_data$time - panel_data$event,
+                                         NA)
+
+
+```
+
+## DiD Analysis with DiD Imputation Package
+
+```{r did_analysis}
+# List of outcome variables
+
+outcome_vars <- c(
+    "commits",
+    "lines_added",
+    "duplicated_lines_density",
+    "comment_lines_density",
+    "quality_warnings",
+    "cognitive_complexity"
+)
+outcome_names <- c(
+    "Commits",
+    "Lines Added",
+    "Duplicated Lines Density",
+    "% Comment Lines",
+    "Static Analysis Warnings",
+    "Cognitive/Code Complexity"
+)
+
+base_settings <- c(
+    "Repositories without prior AI traces (AF)",
+    "Repositories with prior AI traces (IF)"
+)
+
+build_setting_variant <- function(data, setting_label) {
+    dt <- data
+    # Base settings
+    if (setting_label == "Repositories without prior AI traces (AF)") {
+        dt <- dt[dt$matched_agent_first_or_corresponding_matched_control == TRUE | is.na(dt$matched_agent_first_or_corresponding_matched_control), ]
+    } else if (setting_label == "Repositories with prior AI traces (IF)") {
+        dt <- dt[dt$matched_ide_first_or_corresponding_matched_control == TRUE | is.na(dt$matched_ide_first_or_corresponding_matched_control), ]
+    # Full subset settings
+    } else if (setting_label == "L1 Full Subset") {
+        dt <- dt[dt$l1_full_subset == TRUE | is.na(dt$l1_full_subset), ]
+    } else if (setting_label == "L2 Full Subset") {
+        dt <- dt[dt$l2_full_subset == TRUE | is.na(dt$l2_full_subset), ]
+    } else if (setting_label == "L12 Full Subset") {
+        dt <- dt[dt$l12_full_subset == TRUE | is.na(dt$l12_full_subset), ]
+    } else if (setting_label == "L3 Full Subset") {
+        dt <- dt[dt$l3_full_subset == TRUE | is.na(dt$l3_full_subset), ]
+    } else if (setting_label == "L4 Full Subset") {
+        dt <- dt[dt$l4_full_subset == TRUE | is.na(dt$l4_full_subset), ]
+    } else if (setting_label == "L2+ Full Subset") {
+        dt <- dt[dt$`l2+_full_subset` == TRUE | is.na(dt$`l2+_full_subset`), ]
+    } else if (setting_label == "L3+ Full Subset") {
+        dt <- dt[dt$`l3+_full_subset` == TRUE | is.na(dt$`l3+_full_subset`), ]
+    # Agent subset settings
+    } else if (setting_label == "L1 Agent Subset") {
+        dt <- dt[dt$l1_agent_subset == TRUE | is.na(dt$l1_agent_subset), ]
+    } else if (setting_label == "L2 Agent Subset") {
+        dt <- dt[dt$l2_agent_subset == TRUE | is.na(dt$l2_agent_subset), ]
+    } else if (setting_label == "L12 Agent Subset") {
+        dt <- dt[dt$l12_agent_subset == TRUE | is.na(dt$l12_agent_subset), ]
+    } else if (setting_label == "L3 Agent Subset") {
+        dt <- dt[dt$l3_agent_subset == TRUE | is.na(dt$l3_agent_subset), ]
+    } else if (setting_label == "L4 Agent Subset") {
+        dt <- dt[dt$l4_agent_subset == TRUE | is.na(dt$l4_agent_subset), ]
+    } else if (setting_label == "L2+ Agent Subset") {
+        dt <- dt[dt$`l2+_agent_subset` == TRUE | is.na(dt$`l2+_agent_subset`), ]
+    } else if (setting_label == "L3+ Agent Subset") {
+        dt <- dt[dt$`l3+_agent_subset` == TRUE | is.na(dt$`l3+_agent_subset`), ]
+    # IDE subset settings
+    } else if (setting_label == "L1 IDE Subset") {
+        dt <- dt[dt$l1_ide_subset == TRUE | is.na(dt$l1_ide_subset), ]
+    } else if (setting_label == "L2 IDE Subset") {
+        dt <- dt[dt$l2_ide_subset == TRUE | is.na(dt$l2_ide_subset), ]
+    } else if (setting_label == "L12 IDE Subset") {
+        dt <- dt[dt$l12_ide_subset == TRUE | is.na(dt$l12_ide_subset), ]
+    } else if (setting_label == "L3 IDE Subset") {
+        dt <- dt[dt$l3_ide_subset == TRUE | is.na(dt$l3_ide_subset), ]
+    } else if (setting_label == "L4 IDE Subset") {
+        dt <- dt[dt$l4_ide_subset == TRUE | is.na(dt$l4_ide_subset), ]
+    } else if (setting_label == "L2+ IDE Subset") {
+        dt <- dt[dt$`l2+_ide_subset` == TRUE | is.na(dt$`l2+_ide_subset`), ]
+    } else if (setting_label == "L3+ IDE Subset") {
+        dt <- dt[dt$`l3+_ide_subset` == TRUE | is.na(dt$`l3+_ide_subset`), ]
+    }
+    dt
+}
+```
+
+## Aggregate Treatment Effects - Base Settings
+
+```{r aggregate_effects}
+# Function to extract static treatment effects (overall effect)
+get_static_effects <- function(outcome_var, data) {
+    # Run static DiD (no horizon/pretrends specified)
+    static_result <- did_imputation(
+        data = data,
+        yname = outcome_var,
+        gname = "event",
+        tname = "time",
+        idname = "repo_name",
+        first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time
+    )
+
+    return(static_result)
+}
+
+# Calculate static effects for each base setting
+static_results_by_setting <- list()
+for (setting in base_settings) {
+    cat("Calculating aggregate effects for:", setting, "\n")
+    data_s <- build_setting_variant(panel_data, setting)
+    static_results_by_setting[[setting]] <- list()
+    for (var in outcome_vars) {
+        static_results_by_setting[[setting]][[var]] <- get_static_effects(var, data_s)
+    }
+}
+
+# Create comparison dataframe
+static_comparison <- data.frame()
+for (setting in base_settings) {
+    static_df <- data.frame(
+        Setting = setting,
+        Outcome = names(static_results_by_setting[[setting]]),
+        Estimate = sapply(static_results_by_setting[[setting]], function(x) x$estimate[x$term == "treat"]),
+        SE = sapply(static_results_by_setting[[setting]], function(x) x$std.error[x$term == "treat"]),
+        CI_Lower = sapply(static_results_by_setting[[setting]], function(x) x$conf.low[x$term == "treat"]),
+        CI_Upper = sapply(static_results_by_setting[[setting]], function(x) x$conf.high[x$term == "treat"])
+    )
+    static_comparison <- rbind(static_comparison, static_df)
+}
+
+# Calculate p-values from estimate and SE
+static_comparison$p_value <- 2 * pnorm(-abs(static_comparison$Estimate / static_comparison$SE))
+
+# Add significance stars
+static_comparison$Sig <- ifelse(static_comparison$p_value < 0.001, "***",
+                         ifelse(static_comparison$p_value < 0.01, "**",
+                         ifelse(static_comparison$p_value < 0.05, "*",
+                         ifelse(static_comparison$p_value < 0.1, ".", ""))))
+
+# Calculate percent change: 100*(e^β - 1)
+static_comparison$Percent_Change <- 100 * (exp(static_comparison$Estimate) - 1)
+
+# Clean outcome names for display
+static_comparison$Outcome <- gsub("log\\((.+) \\+ 1\\)", "\\1", static_comparison$Outcome)
+static_comparison$Outcome <- gsub("_", " ", static_comparison$Outcome)
+static_comparison$Outcome <- tools::toTitleCase(static_comparison$Outcome)
+
+# Display static effects
+knitr::kable(static_comparison,
+    digits = 3,
+    col.names = c("Setting", "Outcome", "Estimate", "SE", "CI Lower", "CI Upper", "p-value", "Sig", "% Change"),
+    caption = "Static Treatment Effects Comparison: AF vs IF Control Groups (*** p<0.001, ** p<0.01, * p<0.05, . p<0.1)",
+    row.names = FALSE
+) %>%
+    kableExtra::kable_styling(
+        bootstrap_options = c("striped", "hover", "condensed"),
+        full_width = FALSE
+    ) %>%
+    kableExtra::pack_rows(base_settings[1], 1, length(outcome_vars)) %>%
+    kableExtra::pack_rows(base_settings[2], length(outcome_vars) + 1, 2 * length(outcome_vars))
+
+# Export static effects to CSV
+write.csv(static_comparison, "../results/static_effects_base_settings.csv", row.names = FALSE)
+cat("Static effects exported to ../results/static_effects_base_settings.csv\n")
+```
+
+## Dynamic Treatment Effects (Event Study)
+
+```{r dynamic_effects_6outcomes, fig.width=18, fig.height=4}
+settings <- base_settings
+
+collect_dynamic_results <- function(outcomes, settings) {
+    results <- list()
+    for (s in settings) {
+        data_s <- build_setting_variant(panel_data, s)
+        for (y in outcomes) {
+            tryCatch({
+                dyn <- didimputation::did_imputation(
+                    data = data_s,
+                    yname = y,
+                    gname = "event",
+                    tname = "time",
+                    idname = "repo_name",
+                    first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                    horizon = -6:6,
+                    pretrends = -6:-2
+                )
+                dyn$setting <- s
+                dyn$outcome <- y
+                results[[length(results) + 1]] <- dyn
+            }, error = function(e) {
+                cat("Warning: Skipping", s, "for outcome", y, "- insufficient data\n")
+                cat("Error message:", conditionMessage(e), "\n")
+            })
+        }
+    }
+    dplyr::bind_rows(results)
+}
+
+dyn_all <- collect_dynamic_results(outcome_vars, settings)
+
+count_setting_stats <- function(setting_name) {
+    data_s <- build_setting_variant(panel_data, setting_name)
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    n_obs <- nrow(data_s)
+    list(treat = n_treat, control = n_control, obs = n_obs)
+}
+setting_stats <- lapply(settings, count_setting_stats)
+settings_with_counts <- paste0(settings, " (n=", sapply(setting_stats, `[[`, "treat"),
+                               "+", sapply(setting_stats, `[[`, "control"),
+                               ", obs=", sapply(setting_stats, `[[`, "obs"), ")")
+names(settings_with_counts) <- settings
+
+plot_dyn <- dyn_all[dyn_all$term != "treat", ]
+plot_dyn$time <- as.numeric(plot_dyn$term)
+plot_dyn <- plot_dyn[plot_dyn$time >= -6 & plot_dyn$time <= 6, ]
+
+label_map <- setNames(outcome_names, outcome_vars)
+plot_dyn$outcome_label <- label_map[plot_dyn$outcome]
+plot_dyn <- plot_dyn[!is.na(plot_dyn$outcome_label), ]
+plot_dyn$outcome_label <- factor(plot_dyn$outcome_label, levels = outcome_names)
+plot_dyn$setting_label <- settings_with_counts[plot_dyn$setting]
+plot_dyn$setting_label <- factor(plot_dyn$setting_label, levels = settings_with_counts, ordered = TRUE)
+plot_dyn$setting <- factor(plot_dyn$setting, levels = settings, ordered = TRUE)
+plot_dyn$significant <- (plot_dyn$conf.low > 0) | (plot_dyn$conf.high < 0)
+
+plot_dyn$linetype_sig <- ifelse(plot_dyn$significant, "solid", "dotted")
+pos <- position_dodge(width = 0.5)
+
+key_outcomes <- c("Commits", "Lines Added", "% Comment Lines", "Duplicated Lines Density", 
+                  "Static Analysis Warnings", "Cognitive/Code Complexity")
+plot_dyn_key <- plot_dyn[plot_dyn$outcome_label %in% key_outcomes, ]
+plot_dyn_key$outcome_label <- factor(plot_dyn_key$outcome_label, levels = key_outcomes)
+
+# Calculate percentage change for export
+plot_dyn_key$percent_change <- 100 * (exp(plot_dyn_key$estimate) - 1)
+
+# Export dynamic effects to CSV
+dynamic_export <- plot_dyn_key[, c("setting", "outcome_label", "time", "estimate", "std.error", 
+                                   "conf.low", "conf.high", "significant", "percent_change")]
+colnames(dynamic_export) <- c("Setting", "Outcome", "Time", "Estimate", "SE", 
+                              "CI_Lower", "CI_Upper", "Significant", "Percent_Change")
+write.csv(dynamic_export, "../results/dynamic_effects_base_settings.csv", row.names = FALSE)
+cat("Dynamic effects exported to ../results/dynamic_effects_base_settings.csv\n")
+
+dynamic_plot_6_onerow <- ggplot(plot_dyn_key, aes(x = time, y = estimate, color = setting_label)) +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                  position = pos, width = 0.4) +
+    geom_point(aes(shape = significant, fill = after_scale(ifelse(significant, color, NA))),
+               position = pos, size = 1.5) +
+    scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21), guide = "none") +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    geom_vline(xintercept = -0.5, linetype = "dashed") +
+    scale_x_continuous(breaks = -6:6) +
+    coord_cartesian(xlim = c(-6.5, 6.5)) +
+    scale_linetype_identity() +
+    scale_color_manual(values = setNames(c(
+        "#0072B2",  # Repositories without prior AI traces (AF) - Blue
+        "#D55E00"   # Repositories with prior AI traces (IF) - Orange
+    ), settings_with_counts), drop = FALSE) +
+    labs(
+        x = "Months Relative to Agent Adoption",
+        y = "Treatment Effect",
+        color = "Setting",
+        caption = "Filled dots: p < 0.05 (significant), Hollow dots: p ≥ 0.05 (non-significant)"
+    ) +
+    guides(color = guide_legend(nrow = 1)) +
+    theme_minimal() +
+    theme(
+        legend.position = "bottom",
+        plot.caption = element_text(hjust = 0.5, size = 12, margin = margin(t = 3)),
+        legend.margin = margin(b = 3),
+        legend.box.margin = margin(t = -5),
+        legend.text = element_text(size = 12),
+        strip.text = element_text(size = 12, face = "bold"),
+        axis.text = element_text(size = 11),
+        axis.title = element_text(size = 12)
+    ) +
+    facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+
+print(dynamic_plot_6_onerow)
+
+ggsave("../plots/dynamic_effects.pdf",
+  plot = dynamic_plot_6_onerow, width = 18, height = 4,
+  device = CairoPDF, family = "DejaVu Sans")
+```
+
+## Dynamic Treatment Effects with Percentage Values
+
+```{r dynamic_effects_with_percentages, fig.width=18, fig.height=5}
+# Calculate percentage change for text labels
+plot_dyn_key$percent_change <- 100 * (exp(plot_dyn_key$estimate) - 1)
+
+# Create the same plot with percentage labels
+dynamic_plot_with_pct <- ggplot(plot_dyn_key, aes(x = time, y = estimate, color = setting_label)) +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                  position = pos, width = 0.4) +
+    geom_point(aes(shape = significant, fill = after_scale(ifelse(significant, color, NA))),
+               position = pos, size = 1.5) +
+    # Add percentage text labels
+    geom_text(aes(label = sprintf("%.1f%%", percent_change)),
+              position = position_dodge(width = 0.5),
+              vjust = -0.8, size = 2.5, show.legend = FALSE) +
+    scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21), guide = "none") +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    geom_vline(xintercept = -0.5, linetype = "dashed") +
+    scale_x_continuous(breaks = -6:6) +
+    coord_cartesian(xlim = c(-6.5, 6.5)) +
+    scale_linetype_identity() +
+    scale_color_manual(values = setNames(c(
+        "#0072B2",  # Repositories without prior AI traces (AF) - Blue
+        "#D55E00"   # Repositories with prior AI traces (IF) - Orange
+    ), settings_with_counts), drop = FALSE) +
+    labs(
+        x = "Months Relative to Agent Adoption",
+        y = "Treatment Effect",
+        color = "Setting",
+        caption = "Filled dots: p < 0.05 (significant), Hollow dots: p ≥ 0.05 (non-significant)\nPercentage values show % change: 100*(e^β - 1)"
+    ) +
+    guides(color = guide_legend(nrow = 1)) +
+    theme_minimal() +
+    theme(
+        legend.position = "bottom",
+        plot.caption = element_text(hjust = 0.5, size = 11, margin = margin(t = 3)),
+        legend.margin = margin(b = 3),
+        legend.box.margin = margin(t = -5),
+        legend.text = element_text(size = 12),
+        strip.text = element_text(size = 12, face = "bold"),
+        axis.text = element_text(size = 11),
+        axis.title = element_text(size = 12)
+    ) +
+    facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+
+print(dynamic_plot_with_pct)
+
+ggsave("../plots/dynamic_effects_with_percentages.pdf",
+  plot = dynamic_plot_with_pct, width = 18, height = 5,
+  device = CairoPDF, family = "DejaVu Sans")
+```
+
+# Maturity Level Analysis: Full Subset (AF OR IF)
+
+This section analyzes the impact across different maturity levels for repos in the matched dataset (either AF or IF).
+
+## Full Subset Settings
+
+```{r full_subset_setup}
+full_subset_settings <- c(
+    "L1 Full Subset",
+    "L2 Full Subset",
+    "L12 Full Subset",
+    "L3 Full Subset",
+    "L4 Full Subset",
+    "L2+ Full Subset",
+    "L3+ Full Subset"
+)
+```
+
+## Aggregate Treatment Effects - Full Subset
+
+```{r full_subset_static}
+# Calculate static effects for full subset settings
+static_results_full <- list()
+for (setting in full_subset_settings) {
+    cat("Calculating aggregate effects for:", setting, "\n")
+    data_s <- build_setting_variant(panel_data, setting)
+    static_results_full[[setting]] <- list()
+    for (var in outcome_vars) {
+        static_results_full[[setting]][[var]] <- get_static_effects(var, data_s)
+    }
+}
+
+# Create comparison dataframe
+static_comparison_full <- data.frame()
+for (setting in full_subset_settings) {
+    static_df <- data.frame(
+        Setting = setting,
+        Outcome = names(static_results_full[[setting]]),
+        Estimate = sapply(static_results_full[[setting]], function(x) x$estimate[x$term == "treat"]),
+        SE = sapply(static_results_full[[setting]], function(x) x$std.error[x$term == "treat"]),
+        CI_Lower = sapply(static_results_full[[setting]], function(x) x$conf.low[x$term == "treat"]),
+        CI_Upper = sapply(static_results_full[[setting]], function(x) x$conf.high[x$term == "treat"])
+    )
+    static_comparison_full <- rbind(static_comparison_full, static_df)
+}
+
+# Calculate p-values and significance
+static_comparison_full$p_value <- 2 * pnorm(-abs(static_comparison_full$Estimate / static_comparison_full$SE))
+static_comparison_full$Sig <- ifelse(static_comparison_full$p_value < 0.001, "***",
+                         ifelse(static_comparison_full$p_value < 0.01, "**",
+                         ifelse(static_comparison_full$p_value < 0.05, "*",
+                         ifelse(static_comparison_full$p_value < 0.1, ".", ""))))
+static_comparison_full$Percent_Change <- 100 * (exp(static_comparison_full$Estimate) - 1)
+
+# Clean outcome names
+static_comparison_full$Outcome <- gsub("log\\((.+) \\+ 1\\)", "\\1", static_comparison_full$Outcome)
+static_comparison_full$Outcome <- gsub("_", " ", static_comparison_full$Outcome)
+static_comparison_full$Outcome <- tools::toTitleCase(static_comparison_full$Outcome)
+
+# Display static effects table
+knitr::kable(static_comparison_full,
+    digits = 3,
+    col.names = c("Setting", "Outcome", "Estimate", "SE", "CI Lower", "CI Upper", "p-value", "Sig", "% Change"),
+    caption = "Static Treatment Effects: Full Subset by Maturity Level (*** p<0.001, ** p<0.01, * p<0.05, . p<0.1)",
+    row.names = FALSE
+) %>%
+    kableExtra::kable_styling(
+        bootstrap_options = c("striped", "hover", "condensed"),
+        full_width = FALSE
+    ) %>%
+    kableExtra::pack_rows("L1 Full Subset", 1, length(outcome_vars)) %>%
+    kableExtra::pack_rows("L2 Full Subset", length(outcome_vars) + 1, 2 * length(outcome_vars)) %>%
+    kableExtra::pack_rows("L12 Full Subset", 2 * length(outcome_vars) + 1, 3 * length(outcome_vars)) %>%
+    kableExtra::pack_rows("L3 Full Subset", 3 * length(outcome_vars) + 1, 4 * length(outcome_vars)) %>%
+    kableExtra::pack_rows("L4 Full Subset", 4 * length(outcome_vars) + 1, 5 * length(outcome_vars)) %>%
+    kableExtra::pack_rows("L2+ Full Subset", 5 * length(outcome_vars) + 1, 6 * length(outcome_vars)) %>%
+    kableExtra::pack_rows("L3+ Full Subset", 6 * length(outcome_vars) + 1, 7 * length(outcome_vars))
+
+# Export static effects to CSV
+write.csv(static_comparison_full, "../results/static_effects_full_subset.csv", row.names = FALSE)
+cat("Static effects exported to ../results/static_effects_full_subset.csv\n")
+```
+
+## Dynamic Treatment Effects - Full Subset
+
+```{r full_subset_dynamic, fig.width=18, fig.height=4}
+# Define colors for each setting
+full_subset_colors <- c(
+    "#E69F00",  # L1 - Orange
+    "#56B4E9",  # L2 - Sky Blue
+    "#CC79A7",  # L12 - Pink
+    "#009E73",  # L3 - Green
+    "#F0E442",  # L4 - Yellow
+    "#0072B2",  # L2+ - Blue
+    "#D55E00"   # L3+ - Dark Orange
+)
+names(full_subset_colors) <- full_subset_settings
+
+# Create a plot for each setting
+for (i in seq_along(full_subset_settings)) {
+    setting <- full_subset_settings[i]
+    setting_color <- full_subset_colors[setting]
+    
+    # Get filtered data for this setting
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    # Get counts for this setting
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    n_obs <- nrow(data_s)
+    setting_label <- paste0(setting, " (n=", n_treat, "+", n_control, ", obs=", n_obs, ")")
+    
+    # Run dynamic analysis for this setting
+    setting_results <- list()
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            setting_results[[length(setting_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+    
+    if (length(setting_results) == 0) {
+        cat("Skipping plot for", setting, "- no results available\n")
+        next
+    }
+    
+    # Combine results for this setting
+    plot_data <- dplyr::bind_rows(setting_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    # Add outcome labels
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    
+    # Filter to key outcomes
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, color = setting_color) +
+        geom_point(aes(shape = significant), fill = setting_color,
+                   size = 2, color = setting_color) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21), guide = "none") +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = setting_label,
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            caption = "Filled dots: p < 0.05 (significant), Hollow dots: p ≥ 0.05 (non-significant)"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            plot.caption = element_text(hjust = 0.5, size = 12, margin = margin(t = 3)),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12)
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    
+    # Save individual plot
+    ggsave(paste0("../plots/dynamic_effects_full_subset_", tolower(gsub(" ", "_", gsub("\\+", "plus", setting))), ".pdf"),
+           plot = p, width = 18, height = 4,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+## Dynamic Treatment Effects - Full Subset (with Percentages)
+
+```{r full_subset_dynamic_pct, fig.width=18, fig.height=5}
+# Create a plot for each setting with percentage labels
+for (i in seq_along(full_subset_settings)) {
+    setting <- full_subset_settings[i]
+    setting_color <- full_subset_colors[setting]
+    
+    # Get filtered data for this setting
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    # Get counts for this setting
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    n_obs <- nrow(data_s)
+    setting_label <- paste0(setting, " (n=", n_treat, "+", n_control, ", obs=", n_obs, ")")
+    
+    # Run dynamic analysis for this setting
+    setting_results <- list()
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            setting_results[[length(setting_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+    
+    if (length(setting_results) == 0) {
+        cat("Skipping plot for", setting, "- no results available\n")
+        next
+    }
+    
+    # Combine results for this setting
+    plot_data <- dplyr::bind_rows(setting_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    # Add outcome labels
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    
+    # Calculate percentage change
+    plot_data$percent_change <- 100 * (exp(plot_data$estimate) - 1)
+    
+    # Filter to key outcomes
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, color = setting_color) +
+        geom_point(aes(shape = significant), fill = setting_color,
+                   size = 2, color = setting_color) +
+        geom_text(aes(label = sprintf("%.1f%%", percent_change)),
+                  vjust = -0.8, size = 2.5, show.legend = FALSE, color = setting_color) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21), guide = "none") +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = setting_label,
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            caption = "Filled dots: p < 0.05 (significant), Hollow dots: p ≥ 0.05 (non-significant)\nPercentage values show % change: 100*(e^β - 1)"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            plot.caption = element_text(hjust = 0.5, size = 11, margin = margin(t = 3)),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12)
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    
+    # Save individual plot
+    ggsave(paste0("../plots/dynamic_effects_full_subset_", tolower(gsub(" ", "_", gsub("\\+", "plus", setting))), "_with_percentages.pdf"),
+           plot = p, width = 18, height = 5,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+```{r export_full_subset_dynamic}
+# Collect all dynamic results for full subset and export to CSV
+all_dynamic_full <- list()
+
+for (setting in full_subset_settings) {
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    
+    if (n_treat < 5) {
+        next
+    }
+    
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            dyn$setting <- setting
+            all_dynamic_full[[length(all_dynamic_full) + 1]] <- dyn
+        }, error = function(e) {
+            # Skip silently
+        })
+    }
+}
+
+if (length(all_dynamic_full) > 0) {
+    dynamic_full_df <- dplyr::bind_rows(all_dynamic_full)
+    dynamic_full_df <- dynamic_full_df[dynamic_full_df$term != "treat", ]
+    dynamic_full_df$time <- as.numeric(dynamic_full_df$term)
+    dynamic_full_df <- dynamic_full_df[dynamic_full_df$time >= -6 & dynamic_full_df$time <= 6, ]
+    
+    dynamic_full_df$outcome_label <- label_map[dynamic_full_df$outcome]
+    dynamic_full_df <- dynamic_full_df[!is.na(dynamic_full_df$outcome_label), ]
+    dynamic_full_df$significant <- (dynamic_full_df$conf.low > 0) | (dynamic_full_df$conf.high < 0)
+    dynamic_full_df$percent_change <- 100 * (exp(dynamic_full_df$estimate) - 1)
+    
+    # Export
+    dynamic_export_full <- dynamic_full_df[, c("setting", "outcome_label", "time", "estimate", 
+                                                "std.error", "conf.low", "conf.high", 
+                                                "significant", "percent_change")]
+    colnames(dynamic_export_full) <- c("Setting", "Outcome", "Time", "Estimate", "SE", 
+                                        "CI_Lower", "CI_Upper", "Significant", "Percent_Change")
+    write.csv(dynamic_export_full, "../results/dynamic_effects_full_subset.csv", row.names = FALSE)
+    cat("Dynamic effects (full subset) exported to ../results/dynamic_effects_full_subset.csv\n")
+}
+```
+
+## Combined Setting Plots - Full Subset
+
+```{r full_subset_combined_l1234, fig.width=18, fig.height=4}
+# Combined plot for L1, L2, L3, L4
+combined_settings <- c("L1 Full Subset", "L2 Full Subset", "L3 Full Subset", "L4 Full Subset")
+combined_results <- list()
+
+for (setting in combined_settings) {
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    
+    if (n_treat < 5) {
+        cat("Skipping", setting, "- insufficient treatment repos (n=", n_treat, ")\n")
+        next
+    }
+    
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            dyn$setting <- setting
+            combined_results[[length(combined_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+}
+
+if (length(combined_results) > 0) {
+    plot_data <- dplyr::bind_rows(combined_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    plot_data <- plot_data %>% distinct(setting, outcome_label, time, .keep_all = TRUE)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate, color = setting)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, position = position_dodge(width = 0.3)) +
+        geom_point(aes(shape = significant), size = 2, position = position_dodge(width = 0.3)) +
+        scale_color_manual(values = full_subset_colors[combined_settings]) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21)) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = "Combined: L1, L2, L3, L4 Full Subset",
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            color = "Setting",
+            shape = "Significant"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12),
+            legend.position = "bottom"
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    ggsave("../plots/dynamic_effects_full_subset_combined_l1234.pdf",
+           plot = p, width = 18, height = 5,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+```{r full_subset_combined_l1234_pct, fig.width=18, fig.height=4}
+# Combined plot for L1, L2, L3, L4 with percentages
+combined_settings <- c("L1 Full Subset", "L2 Full Subset", "L3 Full Subset", "L4 Full Subset")
+combined_results <- list()
+
+for (setting in combined_settings) {
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    
+    if (n_treat < 5) {
+        cat("Skipping", setting, "- insufficient treatment repos (n=", n_treat, ")\n")
+        next
+    }
+    
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            dyn$setting <- setting
+            combined_results[[length(combined_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+}
+
+if (length(combined_results) > 0) {
+    plot_data <- dplyr::bind_rows(combined_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    plot_data$percent_change <- 100 * (exp(plot_data$estimate) - 1)
+    
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    plot_data <- plot_data %>% distinct(setting, outcome_label, time, .keep_all = TRUE)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate, color = setting)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, position = position_dodge(width = 0.3)) +
+        geom_point(aes(shape = significant), size = 2, position = position_dodge(width = 0.3)) +
+        geom_text(aes(label = sprintf("%.1f%%", percent_change)),
+                  vjust = -0.8, size = 2, show.legend = FALSE, position = position_dodge(width = 0.3)) +
+        scale_color_manual(values = full_subset_colors[combined_settings]) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21)) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = "Combined: L1, L2, L3, L4 Full Subset (with Percentages)",
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            color = "Setting",
+            shape = "Significant"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12),
+            legend.position = "bottom"
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    ggsave("../plots/dynamic_effects_full_subset_combined_l1234_with_percentages.pdf",
+           plot = p, width = 18, height = 5,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+```{r full_subset_combined_l1_l2plus, fig.width=18, fig.height=4}
+# Combined plot for L1, L2+
+combined_settings <- c("L1 Full Subset", "L2+ Full Subset")
+combined_results <- list()
+
+for (setting in combined_settings) {
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    
+    if (n_treat < 5) {
+        cat("Skipping", setting, "- insufficient treatment repos (n=", n_treat, ")\n")
+        next
+    }
+    
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            dyn$setting <- setting
+            combined_results[[length(combined_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+}
+
+if (length(combined_results) > 0) {
+    plot_data <- dplyr::bind_rows(combined_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    plot_data <- plot_data %>% distinct(setting, outcome_label, time, .keep_all = TRUE)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate, color = setting)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, position = position_dodge(width = 0.3)) +
+        geom_point(aes(shape = significant), size = 2, position = position_dodge(width = 0.3)) +
+        scale_color_manual(values = full_subset_colors[combined_settings]) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21)) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = "Combined: L1, L2+ Full Subset",
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            color = "Setting",
+            shape = "Significant"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12),
+            legend.position = "bottom"
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    ggsave("../plots/dynamic_effects_full_subset_combined_l1_l2plus.pdf",
+           plot = p, width = 18, height = 5,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+```{r full_subset_combined_l1_l2plus_pct, fig.width=18, fig.height=4}
+# Combined plot for L1, L2+ with percentages
+combined_settings <- c("L1 Full Subset", "L2+ Full Subset")
+combined_results <- list()
+
+for (setting in combined_settings) {
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    
+    if (n_treat < 5) {
+        cat("Skipping", setting, "- insufficient treatment repos (n=", n_treat, ")\n")
+        next
+    }
+    
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            dyn$setting <- setting
+            combined_results[[length(combined_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+}
+
+if (length(combined_results) > 0) {
+    plot_data <- dplyr::bind_rows(combined_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    plot_data$percent_change <- 100 * (exp(plot_data$estimate) - 1)
+    
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    plot_data <- plot_data %>% distinct(setting, outcome_label, time, .keep_all = TRUE)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate, color = setting)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, position = position_dodge(width = 0.3)) +
+        geom_point(aes(shape = significant), size = 2, position = position_dodge(width = 0.3)) +
+        geom_text(aes(label = sprintf("%.1f%%", percent_change)),
+                  vjust = -0.8, size = 2, show.legend = FALSE, position = position_dodge(width = 0.3)) +
+        scale_color_manual(values = full_subset_colors[combined_settings]) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21)) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = "Combined: L1, L2+ Full Subset (with Percentages)",
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            color = "Setting",
+            shape = "Significant"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12),
+            legend.position = "bottom"
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    ggsave("../plots/dynamic_effects_full_subset_combined_l1_l2plus_with_percentages.pdf",
+           plot = p, width = 18, height = 5,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+```{r full_subset_combined_l12_l3plus, fig.width=18, fig.height=4}
+# Combined plot for L12, L3+
+combined_settings <- c("L12 Full Subset", "L3+ Full Subset")
+combined_results <- list()
+
+for (setting in combined_settings) {
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    
+    if (n_treat < 5) {
+        cat("Skipping", setting, "- insufficient treatment repos (n=", n_treat, ")\n")
+        next
+    }
+    
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            dyn$setting <- setting
+            combined_results[[length(combined_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+}
+
+if (length(combined_results) > 0) {
+    plot_data <- dplyr::bind_rows(combined_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    plot_data <- plot_data %>% distinct(setting, outcome_label, time, .keep_all = TRUE)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate, color = setting)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, position = position_dodge(width = 0.3)) +
+        geom_point(aes(shape = significant), size = 2, position = position_dodge(width = 0.3)) +
+        scale_color_manual(values = full_subset_colors[combined_settings]) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21)) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = "Combined: L12, L3+ Full Subset",
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            color = "Setting",
+            shape = "Significant"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12),
+            legend.position = "bottom"
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    ggsave("../plots/dynamic_effects_full_subset_combined_l12_l3plus.pdf",
+           plot = p, width = 18, height = 5,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+```{r full_subset_combined_l12_l3plus_pct, fig.width=18, fig.height=4}
+# Combined plot for L12, L3+ with percentages
+combined_settings <- c("L12 Full Subset", "L3+ Full Subset")
+combined_results <- list()
+
+for (setting in combined_settings) {
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    
+    if (n_treat < 5) {
+        cat("Skipping", setting, "- insufficient treatment repos (n=", n_treat, ")\n")
+        next
+    }
+    
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            dyn$setting <- setting
+            combined_results[[length(combined_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+}
+
+if (length(combined_results) > 0) {
+    plot_data <- dplyr::bind_rows(combined_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    plot_data$percent_change <- 100 * (exp(plot_data$estimate) - 1)
+    
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    plot_data <- plot_data %>% distinct(setting, outcome_label, time, .keep_all = TRUE)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate, color = setting)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, position = position_dodge(width = 0.3)) +
+        geom_point(aes(shape = significant), size = 2, position = position_dodge(width = 0.3)) +
+        geom_text(aes(label = sprintf("%.1f%%", percent_change)),
+                  vjust = -0.8, size = 2, show.legend = FALSE, position = position_dodge(width = 0.3)) +
+        scale_color_manual(values = full_subset_colors[combined_settings]) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21)) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = "Combined: L12, L3+ Full Subset (with Percentages)",
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            color = "Setting",
+            shape = "Significant"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12),
+            legend.position = "bottom"
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    ggsave("../plots/dynamic_effects_full_subset_combined_l12_l3plus_with_percentages.pdf",
+           plot = p, width = 18, height = 5,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+# Maturity Level Analysis: Agent Subset (AF Only)
+
+This section analyzes the impact across different maturity levels for repos in the Agent First (AF) group only.
+
+## Agent Subset Settings
+
+```{r agent_subset_setup}
+agent_subset_settings <- c(
+    "L1 Agent Subset",
+    "L2 Agent Subset",
+    "L12 Agent Subset",
+    "L3 Agent Subset",
+    "L4 Agent Subset",
+    "L2+ Agent Subset",
+    "L3+ Agent Subset"
+)
+```
+
+## Aggregate Treatment Effects - Agent Subset
+
+```{r agent_subset_static}
+# Calculate static effects for agent subset settings
+static_results_agent <- list()
+for (setting in agent_subset_settings) {
+    cat("Calculating aggregate effects for:", setting, "\n")
+    data_s <- build_setting_variant(panel_data, setting)
+    static_results_agent[[setting]] <- list()
+    for (var in outcome_vars) {
+        static_results_agent[[setting]][[var]] <- get_static_effects(var, data_s)
+    }
+}
+
+# Create comparison dataframe
+static_comparison_agent <- data.frame()
+for (setting in agent_subset_settings) {
+    static_df <- data.frame(
+        Setting = setting,
+        Outcome = names(static_results_agent[[setting]]),
+        Estimate = sapply(static_results_agent[[setting]], function(x) x$estimate[x$term == "treat"]),
+        SE = sapply(static_results_agent[[setting]], function(x) x$std.error[x$term == "treat"]),
+        CI_Lower = sapply(static_results_agent[[setting]], function(x) x$conf.low[x$term == "treat"]),
+        CI_Upper = sapply(static_results_agent[[setting]], function(x) x$conf.high[x$term == "treat"])
+    )
+    static_comparison_agent <- rbind(static_comparison_agent, static_df)
+}
+
+# Calculate p-values and significance
+static_comparison_agent$p_value <- 2 * pnorm(-abs(static_comparison_agent$Estimate / static_comparison_agent$SE))
+static_comparison_agent$Sig <- ifelse(static_comparison_agent$p_value < 0.001, "***",
+                         ifelse(static_comparison_agent$p_value < 0.01, "**",
+                         ifelse(static_comparison_agent$p_value < 0.05, "*",
+                         ifelse(static_comparison_agent$p_value < 0.1, ".", ""))))
+static_comparison_agent$Percent_Change <- 100 * (exp(static_comparison_agent$Estimate) - 1)
+
+# Clean outcome names
+static_comparison_agent$Outcome <- gsub("log\\((.+) \\+ 1\\)", "\\1", static_comparison_agent$Outcome)
+static_comparison_agent$Outcome <- gsub("_", " ", static_comparison_agent$Outcome)
+static_comparison_agent$Outcome <- tools::toTitleCase(static_comparison_agent$Outcome)
+
+# Display static effects table
+knitr::kable(static_comparison_agent,
+    digits = 3,
+    col.names = c("Setting", "Outcome", "Estimate", "SE", "CI Lower", "CI Upper", "p-value", "Sig", "% Change"),
+    caption = "Static Treatment Effects: Agent Subset (AF) by Maturity Level (*** p<0.001, ** p<0.01, * p<0.05, . p<0.1)",
+    row.names = FALSE
+) %>%
+    kableExtra::kable_styling(
+        bootstrap_options = c("striped", "hover", "condensed"),
+        full_width = FALSE
+    ) %>%
+    kableExtra::pack_rows("L1 Agent Subset", 1, length(outcome_vars)) %>%
+    kableExtra::pack_rows("L2 Agent Subset", length(outcome_vars) + 1, 2 * length(outcome_vars)) %>%
+    kableExtra::pack_rows("L12 Agent Subset", 2 * length(outcome_vars) + 1, 3 * length(outcome_vars)) %>%
+    kableExtra::pack_rows("L3 Agent Subset", 3 * length(outcome_vars) + 1, 4 * length(outcome_vars)) %>%
+    kableExtra::pack_rows("L4 Agent Subset", 4 * length(outcome_vars) + 1, 5 * length(outcome_vars)) %>%
+    kableExtra::pack_rows("L2+ Agent Subset", 5 * length(outcome_vars) + 1, 6 * length(outcome_vars)) %>%
+    kableExtra::pack_rows("L3+ Agent Subset", 6 * length(outcome_vars) + 1, 7 * length(outcome_vars))
+
+# Export static effects to CSV
+write.csv(static_comparison_agent, "../results/static_effects_agent_subset.csv", row.names = FALSE)
+cat("Static effects exported to ../results/static_effects_agent_subset.csv\n")
+```
+
+## Dynamic Treatment Effects - Agent Subset
+
+```{r agent_subset_dynamic, fig.width=18, fig.height=4}
+# Define colors for each setting
+agent_subset_colors <- c(
+    "#E69F00",  # L1 - Orange
+    "#56B4E9",  # L2 - Sky Blue
+    "#CC79A7",  # L12 - Pink
+    "#009E73",  # L3 - Green
+    "#F0E442",  # L4 - Yellow
+    "#0072B2",  # L2+ - Blue
+    "#D55E00"   # L3+ - Dark Orange
+)
+names(agent_subset_colors) <- agent_subset_settings
+
+# Create a plot for each setting
+for (i in seq_along(agent_subset_settings)) {
+    setting <- agent_subset_settings[i]
+    setting_color <- agent_subset_colors[setting]
+    
+    # Get filtered data for this setting
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    # Get counts for this setting
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    n_obs <- nrow(data_s)
+    setting_label <- paste0(setting, " (n=", n_treat, "+", n_control, ", obs=", n_obs, ")")
+    
+    # Run dynamic analysis for this setting
+    setting_results <- list()
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            setting_results[[length(setting_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+    
+    if (length(setting_results) == 0) {
+        cat("Skipping plot for", setting, "- no results available\n")
+        next
+    }
+    
+    # Combine results for this setting
+    plot_data <- dplyr::bind_rows(setting_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    # Add outcome labels
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    
+    # Filter to key outcomes
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, color = setting_color) +
+        geom_point(aes(shape = significant), fill = setting_color,
+                   size = 2, color = setting_color) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21), guide = "none") +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = setting_label,
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            caption = "Filled dots: p < 0.05 (significant), Hollow dots: p ≥ 0.05 (non-significant)"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            plot.caption = element_text(hjust = 0.5, size = 12, margin = margin(t = 3)),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12)
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    
+    # Save individual plot
+    ggsave(paste0("../plots/dynamic_effects_agent_subset_", tolower(gsub(" ", "_", gsub("\\+", "plus", setting))), ".pdf"),
+           plot = p, width = 18, height = 4,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+## Dynamic Treatment Effects - Agent Subset (with Percentages)
+
+```{r agent_subset_dynamic_pct, fig.width=18, fig.height=5}
+# Create a plot for each setting with percentage labels
+for (i in seq_along(agent_subset_settings)) {
+    setting <- agent_subset_settings[i]
+    setting_color <- agent_subset_colors[setting]
+    
+    # Get filtered data for this setting
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    # Get counts for this setting
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    n_obs <- nrow(data_s)
+    setting_label <- paste0(setting, " (n=", n_treat, "+", n_control, ", obs=", n_obs, ")")
+    
+    # Run dynamic analysis for this setting
+    setting_results <- list()
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            setting_results[[length(setting_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+    
+    if (length(setting_results) == 0) {
+        cat("Skipping plot for", setting, "- no results available\n")
+        next
+    }
+    
+    # Combine results for this setting
+    plot_data <- dplyr::bind_rows(setting_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    # Add outcome labels
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    
+    # Calculate percentage change
+    plot_data$percent_change <- 100 * (exp(plot_data$estimate) - 1)
+    
+    # Filter to key outcomes
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, color = setting_color) +
+        geom_point(aes(shape = significant, fill = after_scale(ifelse(significant, setting_color, NA))),
+                   size = 2, color = setting_color) +
+        geom_text(aes(label = sprintf("%.1f%%", percent_change)),
+                  vjust = -0.8, size = 2.5, show.legend = FALSE, color = setting_color) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21), guide = "none") +
+        geom_hline(yintercept = 0, linetype = "dashed") +
+        geom_vline(xintercept = -0.5, linetype = "dashed") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = setting_label,
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            caption = "Filled dots: p < 0.05 (significant), Hollow dots: p ≥ 0.05 (non-significant)\nPercentage values show % change: 100*(e^β - 1)"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            plot.caption = element_text(hjust = 0.5, size = 11, margin = margin(t = 3)),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12)
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    
+    # Save individual plot
+    ggsave(paste0("../plots/dynamic_effects_agent_subset_", tolower(gsub(" ", "_", gsub("\\+", "plus", setting))), "_with_percentages.pdf"),
+           plot = p, width = 18, height = 5,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+```{r export_agent_subset_dynamic}
+# Collect all dynamic results for agent subset and export to CSV
+all_dynamic_agent <- list()
+
+for (setting in agent_subset_settings) {
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    
+    if (n_treat < 5) {
+        next
+    }
+    
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            dyn$setting <- setting
+            all_dynamic_agent[[length(all_dynamic_agent) + 1]] <- dyn
+        }, error = function(e) {
+            # Skip silently
+        })
+    }
+}
+
+if (length(all_dynamic_agent) > 0) {
+    dynamic_agent_df <- dplyr::bind_rows(all_dynamic_agent)
+    dynamic_agent_df <- dynamic_agent_df[dynamic_agent_df$term != "treat", ]
+    dynamic_agent_df$time <- as.numeric(dynamic_agent_df$term)
+    dynamic_agent_df <- dynamic_agent_df[dynamic_agent_df$time >= -6 & dynamic_agent_df$time <= 6, ]
+    
+    dynamic_agent_df$outcome_label <- label_map[dynamic_agent_df$outcome]
+    dynamic_agent_df <- dynamic_agent_df[!is.na(dynamic_agent_df$outcome_label), ]
+    dynamic_agent_df$significant <- (dynamic_agent_df$conf.low > 0) | (dynamic_agent_df$conf.high < 0)
+    dynamic_agent_df$percent_change <- 100 * (exp(dynamic_agent_df$estimate) - 1)
+    
+    # Export
+    dynamic_export_agent <- dynamic_agent_df[, c("setting", "outcome_label", "time", "estimate", 
+                                                  "std.error", "conf.low", "conf.high", 
+                                                  "significant", "percent_change")]
+    colnames(dynamic_export_agent) <- c("Setting", "Outcome", "Time", "Estimate", "SE", 
+                                         "CI_Lower", "CI_Upper", "Significant", "Percent_Change")
+    write.csv(dynamic_export_agent, "../results/dynamic_effects_agent_subset.csv", row.names = FALSE)
+    cat("Dynamic effects (agent subset) exported to ../results/dynamic_effects_agent_subset.csv\n")
+}
+```
+
+## Combined Setting Plots - Agent Subset
+
+```{r agent_subset_combined_l1234, fig.width=18, fig.height=4}
+# Combined plot for L1, L2, L3, L4
+combined_settings <- c("L1 Agent Subset", "L2 Agent Subset", "L3 Agent Subset", "L4 Agent Subset")
+combined_results <- list()
+
+for (setting in combined_settings) {
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    
+    if (n_treat < 5) {
+        cat("Skipping", setting, "- insufficient treatment repos (n=", n_treat, ")\n")
+        next
+    }
+    
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            dyn$setting <- setting
+            combined_results[[length(combined_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+}
+
+if (length(combined_results) > 0) {
+    plot_data <- dplyr::bind_rows(combined_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    plot_data <- plot_data %>% distinct(setting, outcome_label, time, .keep_all = TRUE)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate, color = setting)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, position = position_dodge(width = 0.3)) +
+        geom_point(aes(shape = significant), size = 2, position = position_dodge(width = 0.3)) +
+        scale_color_manual(values = agent_subset_colors[combined_settings]) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21)) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = "Combined: L1, L2, L3, L4 Agent Subset",
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            color = "Setting",
+            shape = "Significant"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12),
+            legend.position = "bottom"
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    ggsave("../plots/dynamic_effects_agent_subset_combined_l1234.pdf",
+           plot = p, width = 18, height = 5,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+```{r agent_subset_combined_l1234_pct, fig.width=18, fig.height=4}
+# Combined plot for L1, L2, L3, L4 with percentages
+combined_settings <- c("L1 Agent Subset", "L2 Agent Subset", "L3 Agent Subset", "L4 Agent Subset")
+combined_results <- list()
+
+for (setting in combined_settings) {
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    
+    if (n_treat < 5) {
+        cat("Skipping", setting, "- insufficient treatment repos (n=", n_treat, ")\n")
+        next
+    }
+    
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            dyn$setting <- setting
+            combined_results[[length(combined_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+}
+
+if (length(combined_results) > 0) {
+    plot_data <- dplyr::bind_rows(combined_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    plot_data$percent_change <- 100 * (exp(plot_data$estimate) - 1)
+    
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    plot_data <- plot_data %>% distinct(setting, outcome_label, time, .keep_all = TRUE)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate, color = setting)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, position = position_dodge(width = 0.3)) +
+        geom_point(aes(shape = significant), size = 2, position = position_dodge(width = 0.3)) +
+        geom_text(aes(label = sprintf("%.1f%%", percent_change)),
+                  vjust = -0.8, size = 2, show.legend = FALSE, position = position_dodge(width = 0.3)) +
+        scale_color_manual(values = agent_subset_colors[combined_settings]) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21)) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = "Combined: L1, L2, L3, L4 Agent Subset (with Percentages)",
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            color = "Setting",
+            shape = "Significant"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12),
+            legend.position = "bottom"
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    ggsave("../plots/dynamic_effects_agent_subset_combined_l1234_with_percentages.pdf",
+           plot = p, width = 18, height = 5,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+```{r agent_subset_combined_l1_l2plus, fig.width=18, fig.height=4}
+# Combined plot for L1, L2+
+combined_settings <- c("L1 Agent Subset", "L2+ Agent Subset")
+combined_results <- list()
+
+for (setting in combined_settings) {
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    
+    if (n_treat < 5) {
+        cat("Skipping", setting, "- insufficient treatment repos (n=", n_treat, ")\n")
+        next
+    }
+    
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            dyn$setting <- setting
+            combined_results[[length(combined_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+}
+
+if (length(combined_results) > 0) {
+    plot_data <- dplyr::bind_rows(combined_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    plot_data <- plot_data %>% distinct(setting, outcome_label, time, .keep_all = TRUE)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate, color = setting)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, position = position_dodge(width = 0.3)) +
+        geom_point(aes(shape = significant), size = 2, position = position_dodge(width = 0.3)) +
+        scale_color_manual(values = agent_subset_colors[combined_settings]) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21)) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = "Combined: L1, L2+ Agent Subset",
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            color = "Setting",
+            shape = "Significant"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12),
+            legend.position = "bottom"
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    ggsave("../plots/dynamic_effects_agent_subset_combined_l1_l2plus.pdf",
+           plot = p, width = 18, height = 5,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+```{r agent_subset_combined_l1_l2plus_pct, fig.width=18, fig.height=4}
+# Combined plot for L1, L2+ with percentages
+combined_settings <- c("L1 Agent Subset", "L2+ Agent Subset")
+combined_results <- list()
+
+for (setting in combined_settings) {
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    
+    if (n_treat < 5) {
+        cat("Skipping", setting, "- insufficient treatment repos (n=", n_treat, ")\n")
+        next
+    }
+    
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            dyn$setting <- setting
+            combined_results[[length(combined_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+}
+
+if (length(combined_results) > 0) {
+    plot_data <- dplyr::bind_rows(combined_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    plot_data$percent_change <- 100 * (exp(plot_data$estimate) - 1)
+    
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    plot_data <- plot_data %>% distinct(setting, outcome_label, time, .keep_all = TRUE)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate, color = setting)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, position = position_dodge(width = 0.3)) +
+        geom_point(aes(shape = significant), size = 2, position = position_dodge(width = 0.3)) +
+        geom_text(aes(label = sprintf("%.1f%%", percent_change)),
+                  vjust = -0.8, size = 2, show.legend = FALSE, position = position_dodge(width = 0.3)) +
+        scale_color_manual(values = agent_subset_colors[combined_settings]) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21)) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = "Combined: L1, L2+ Agent Subset (with Percentages)",
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            color = "Setting",
+            shape = "Significant"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12),
+            legend.position = "bottom"
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    ggsave("../plots/dynamic_effects_agent_subset_combined_l1_l2plus_with_percentages.pdf",
+           plot = p, width = 18, height = 5,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+```{r agent_subset_combined_l12_l3plus, fig.width=18, fig.height=4}
+# Combined plot for L12, L3+
+combined_settings <- c("L12 Agent Subset", "L3+ Agent Subset")
+combined_results <- list()
+
+for (setting in combined_settings) {
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    
+    if (n_treat < 5) {
+        cat("Skipping", setting, "- insufficient treatment repos (n=", n_treat, ")\n")
+        next
+    }
+    
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            dyn$setting <- setting
+            combined_results[[length(combined_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+}
+
+if (length(combined_results) > 0) {
+    plot_data <- dplyr::bind_rows(combined_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    plot_data <- plot_data %>% distinct(setting, outcome_label, time, .keep_all = TRUE)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate, color = setting)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, position = position_dodge(width = 0.3)) +
+        geom_point(aes(shape = significant), size = 2, position = position_dodge(width = 0.3)) +
+        scale_color_manual(values = agent_subset_colors[combined_settings]) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21)) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = "Combined: L12, L3+ Agent Subset",
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            color = "Setting",
+            shape = "Significant"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12),
+            legend.position = "bottom"
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    ggsave("../plots/dynamic_effects_agent_subset_combined_l12_l3plus.pdf",
+           plot = p, width = 18, height = 5,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+```{r agent_subset_combined_l12_l3plus_pct, fig.width=18, fig.height=4}
+# Combined plot for L12, L3+ with percentages
+combined_settings <- c("L12 Agent Subset", "L3+ Agent Subset")
+combined_results <- list()
+
+for (setting in combined_settings) {
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    
+    if (n_treat < 5) {
+        cat("Skipping", setting, "- insufficient treatment repos (n=", n_treat, ")\n")
+        next
+    }
+    
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            dyn$setting <- setting
+            combined_results[[length(combined_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+}
+
+if (length(combined_results) > 0) {
+    plot_data <- dplyr::bind_rows(combined_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    plot_data$percent_change <- 100 * (exp(plot_data$estimate) - 1)
+    
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    plot_data <- plot_data %>% distinct(setting, outcome_label, time, .keep_all = TRUE)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate, color = setting)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, position = position_dodge(width = 0.3)) +
+        geom_point(aes(shape = significant), size = 2, position = position_dodge(width = 0.3)) +
+        geom_text(aes(label = sprintf("%.1f%%", percent_change)),
+                  vjust = -0.8, size = 2, show.legend = FALSE, position = position_dodge(width = 0.3)) +
+        scale_color_manual(values = agent_subset_colors[combined_settings]) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21)) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = "Combined: L12, L3+ Agent Subset (with Percentages)",
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            color = "Setting",
+            shape = "Significant"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12),
+            legend.position = "bottom"
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    ggsave("../plots/dynamic_effects_agent_subset_combined_l12_l3plus_with_percentages.pdf",
+           plot = p, width = 18, height = 5,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+# Maturity Level Analysis: IDE Subset (IF Only)
+
+This section analyzes the impact across different maturity levels for repos in the IDE First (IF) group only.
+
+## IDE Subset Settings
+
+```{r ide_subset_setup}
+ide_subset_settings <- c(
+    "L1 IDE Subset",
+    "L2 IDE Subset",
+    "L12 IDE Subset",
+    "L3 IDE Subset",
+    "L4 IDE Subset",
+    "L2+ IDE Subset",
+    "L3+ IDE Subset"
+)
+```
+
+## Aggregate Treatment Effects - IDE Subset
+
+```{r ide_subset_static}
+# Calculate static effects for IDE subset settings
+static_results_ide <- list()
+for (setting in ide_subset_settings) {
+    cat("Calculating aggregate effects for:", setting, "\n")
+    data_s <- build_setting_variant(panel_data, setting)
+    static_results_ide[[setting]] <- list()
+    for (var in outcome_vars) {
+        static_results_ide[[setting]][[var]] <- get_static_effects(var, data_s)
+    }
+}
+
+# Create comparison dataframe
+static_comparison_ide <- data.frame()
+for (setting in ide_subset_settings) {
+    static_df <- data.frame(
+        Setting = setting,
+        Outcome = names(static_results_ide[[setting]]),
+        Estimate = sapply(static_results_ide[[setting]], function(x) x$estimate[x$term == "treat"]),
+        SE = sapply(static_results_ide[[setting]], function(x) x$std.error[x$term == "treat"]),
+        CI_Lower = sapply(static_results_ide[[setting]], function(x) x$conf.low[x$term == "treat"]),
+        CI_Upper = sapply(static_results_ide[[setting]], function(x) x$conf.high[x$term == "treat"])
+    )
+    static_comparison_ide <- rbind(static_comparison_ide, static_df)
+}
+
+# Calculate p-values and significance
+static_comparison_ide$p_value <- 2 * pnorm(-abs(static_comparison_ide$Estimate / static_comparison_ide$SE))
+static_comparison_ide$Sig <- ifelse(static_comparison_ide$p_value < 0.001, "***",
+                         ifelse(static_comparison_ide$p_value < 0.01, "**",
+                         ifelse(static_comparison_ide$p_value < 0.05, "*",
+                         ifelse(static_comparison_ide$p_value < 0.1, ".", ""))))
+static_comparison_ide$Percent_Change <- 100 * (exp(static_comparison_ide$Estimate) - 1)
+
+# Clean outcome names
+static_comparison_ide$Outcome <- gsub("log\\((.+) \\+ 1\\)", "\\1", static_comparison_ide$Outcome)
+static_comparison_ide$Outcome <- gsub("_", " ", static_comparison_ide$Outcome)
+static_comparison_ide$Outcome <- tools::toTitleCase(static_comparison_ide$Outcome)
+
+# Display static effects table
+knitr::kable(static_comparison_ide,
+    digits = 3,
+    col.names = c("Setting", "Outcome", "Estimate", "SE", "CI Lower", "CI Upper", "p-value", "Sig", "% Change"),
+    caption = "Static Treatment Effects: IDE Subset (IF) by Maturity Level (*** p<0.001, ** p<0.01, * p<0.05, . p<0.1)",
+    row.names = FALSE
+) %>%
+    kableExtra::kable_styling(
+        bootstrap_options = c("striped", "hover", "condensed"),
+        full_width = FALSE
+    ) %>%
+    kableExtra::pack_rows("L1 IDE Subset", 1, length(outcome_vars)) %>%
+    kableExtra::pack_rows("L2 IDE Subset", length(outcome_vars) + 1, 2 * length(outcome_vars)) %>%
+    kableExtra::pack_rows("L12 IDE Subset", 2 * length(outcome_vars) + 1, 3 * length(outcome_vars)) %>%
+    kableExtra::pack_rows("L3 IDE Subset", 3 * length(outcome_vars) + 1, 4 * length(outcome_vars)) %>%
+    kableExtra::pack_rows("L4 IDE Subset", 4 * length(outcome_vars) + 1, 5 * length(outcome_vars)) %>%
+    kableExtra::pack_rows("L2+ IDE Subset", 5 * length(outcome_vars) + 1, 6 * length(outcome_vars)) %>%
+    kableExtra::pack_rows("L3+ IDE Subset", 6 * length(outcome_vars) + 1, 7 * length(outcome_vars))
+
+# Export static effects to CSV
+write.csv(static_comparison_ide, "../results/static_effects_ide_subset.csv", row.names = FALSE)
+cat("Static effects exported to ../results/static_effects_ide_subset.csv\n")
+```
+
+## Dynamic Treatment Effects - IDE Subset
+
+```{r ide_subset_dynamic, fig.width=18, fig.height=4}
+# Define colors for each setting
+ide_subset_colors <- c(
+    "#E69F00",  # L1 - Orange
+    "#56B4E9",  # L2 - Sky Blue
+    "#CC79A7",  # L12 - Pink
+    "#009E73",  # L3 - Green
+    "#F0E442",  # L4 - Yellow
+    "#0072B2",  # L2+ - Blue
+    "#D55E00"   # L3+ - Dark Orange
+)
+names(ide_subset_colors) <- ide_subset_settings
+
+# Create a plot for each setting
+for (i in seq_along(ide_subset_settings)) {
+    setting <- ide_subset_settings[i]
+    setting_color <- ide_subset_colors[setting]
+    
+    # Get filtered data for this setting
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    # Get counts for this setting
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    n_obs <- nrow(data_s)
+    
+    if (n_treat < 5) {
+        cat("Skipping", setting, "- insufficient treatment units (n=", n_treat, ")\n")
+        next
+    }
+    
+    setting_label <- paste0(setting, " (n=", n_treat, "+", n_control, ", obs=", n_obs, ")")
+    
+    # Run dynamic analysis for this setting
+    setting_results <- list()
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            setting_results[[length(setting_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+    
+    if (length(setting_results) == 0) {
+        cat("Skipping plot for", setting, "- no results available\n")
+        next
+    }
+    
+    # Combine results for this setting
+    plot_data <- dplyr::bind_rows(setting_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    # Add outcome labels
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    
+    # Filter to key outcomes
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, color = setting_color) +
+        geom_point(aes(shape = significant), fill = setting_color,
+                   size = 2, color = setting_color) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21), guide = "none") +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = setting_label,
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            caption = "Filled dots: p < 0.05 (significant), Hollow dots: p ≥ 0.05 (non-significant)"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            plot.caption = element_text(hjust = 0.5, size = 12, margin = margin(t = 3)),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12)
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    
+    # Save individual plot
+    ggsave(paste0("../plots/dynamic_effects_ide_subset_", tolower(gsub(" ", "_", gsub("\\+", "plus", setting))), ".pdf"),
+           plot = p, width = 18, height = 4,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+## Dynamic Treatment Effects - IDE Subset (with Percentages)
+
+```{r ide_subset_dynamic_pct, fig.width=18, fig.height=5}
+# Create a plot for each setting with percentage labels
+for (i in seq_along(ide_subset_settings)) {
+    setting <- ide_subset_settings[i]
+    setting_color <- ide_subset_colors[setting]
+    
+    # Get filtered data for this setting
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    # Get counts for this setting
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    n_obs <- nrow(data_s)
+    
+    if (n_treat < 5) {
+        cat("Skipping", setting, "- insufficient treatment units (n=", n_treat, ")\n")
+        next
+    }
+    
+    setting_label <- paste0(setting, " (n=", n_treat, "+", n_control, ", obs=", n_obs, ")")
+    
+    # Run dynamic analysis for this setting
+    setting_results <- list()
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            setting_results[[length(setting_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+    
+    if (length(setting_results) == 0) {
+        cat("Skipping plot for", setting, "- no results available\n")
+        next
+    }
+    
+    # Combine results for this setting
+    plot_data <- dplyr::bind_rows(setting_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    # Add outcome labels
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    
+    # Calculate percentage change
+    plot_data$percent_change <- 100 * (exp(plot_data$estimate) - 1)
+    
+    # Filter to key outcomes
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, color = setting_color) +
+        geom_point(aes(shape = significant, fill = after_scale(ifelse(significant, setting_color, NA))),
+                   size = 2, color = setting_color) +
+        geom_text(aes(label = sprintf("%.1f%%", percent_change)),
+                  vjust = -0.8, size = 2.5, show.legend = FALSE, color = setting_color) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21), guide = "none") +
+        geom_hline(yintercept = 0, linetype = "dashed") +
+        geom_vline(xintercept = -0.5, linetype = "dashed") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = setting_label,
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            caption = "Filled dots: p < 0.05 (significant), Hollow dots: p ≥ 0.05 (non-significant)\nPercentage values show % change: 100*(e^β - 1)"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            plot.caption = element_text(hjust = 0.5, size = 11, margin = margin(t = 3)),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12)
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    
+    # Save individual plot
+    ggsave(paste0("../plots/dynamic_effects_ide_subset_", tolower(gsub(" ", "_", gsub("\\+", "plus", setting))), "_with_percentages.pdf"),
+           plot = p, width = 18, height = 5,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+```{r export_ide_subset_dynamic}
+# Collect all dynamic results for ide subset and export to CSV
+all_dynamic_ide <- list()
+
+for (setting in ide_subset_settings) {
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    
+    if (n_treat < 5) {
+        next
+    }
+    
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            dyn$setting <- setting
+            all_dynamic_ide[[length(all_dynamic_ide) + 1]] <- dyn
+        }, error = function(e) {
+            # Skip silently
+        })
+    }
+}
+
+if (length(all_dynamic_ide) > 0) {
+    dynamic_ide_df <- dplyr::bind_rows(all_dynamic_ide)
+    dynamic_ide_df <- dynamic_ide_df[dynamic_ide_df$term != "treat", ]
+    dynamic_ide_df$time <- as.numeric(dynamic_ide_df$term)
+    dynamic_ide_df <- dynamic_ide_df[dynamic_ide_df$time >= -6 & dynamic_ide_df$time <= 6, ]
+    
+    dynamic_ide_df$outcome_label <- label_map[dynamic_ide_df$outcome]
+    dynamic_ide_df <- dynamic_ide_df[!is.na(dynamic_ide_df$outcome_label), ]
+    dynamic_ide_df$significant <- (dynamic_ide_df$conf.low > 0) | (dynamic_ide_df$conf.high < 0)
+    dynamic_ide_df$percent_change <- 100 * (exp(dynamic_ide_df$estimate) - 1)
+    
+    # Export
+    dynamic_export_ide <- dynamic_ide_df[, c("setting", "outcome_label", "time", "estimate", 
+                                              "std.error", "conf.low", "conf.high", 
+                                              "significant", "percent_change")]
+    colnames(dynamic_export_ide) <- c("Setting", "Outcome", "Time", "Estimate", "SE", 
+                                       "CI_Lower", "CI_Upper", "Significant", "Percent_Change")
+    write.csv(dynamic_export_ide, "../results/dynamic_effects_ide_subset.csv", row.names = FALSE)
+    cat("Dynamic effects (ide subset) exported to ../results/dynamic_effects_ide_subset.csv\n")
+}
+```
+
+## Combined Setting Plots - IDE Subset
+
+```{r ide_subset_combined_l1234, fig.width=18, fig.height=4}
+# Combined plot for L1, L2, L3, L4
+combined_settings <- c("L1 IDE Subset", "L2 IDE Subset", "L3 IDE Subset", "L4 IDE Subset")
+combined_results <- list()
+
+for (setting in combined_settings) {
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    
+    if (n_treat < 5) {
+        cat("Skipping", setting, "- insufficient treatment repos (n=", n_treat, ")\n")
+        next
+    }
+    
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            dyn$setting <- setting
+            combined_results[[length(combined_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+}
+
+if (length(combined_results) > 0) {
+    plot_data <- dplyr::bind_rows(combined_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    plot_data <- plot_data %>% distinct(setting, outcome_label, time, .keep_all = TRUE)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate, color = setting)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, position = position_dodge(width = 0.3)) +
+        geom_point(aes(shape = significant), size = 2, position = position_dodge(width = 0.3)) +
+        scale_color_manual(values = ide_subset_colors[combined_settings]) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21)) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = "Combined: L1, L2, L3, L4 IDE Subset",
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            color = "Setting",
+            shape = "Significant"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12),
+            legend.position = "bottom"
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    ggsave("../plots/dynamic_effects_ide_subset_combined_l1234.pdf",
+           plot = p, width = 18, height = 5,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+```{r ide_subset_combined_l1234_pct, fig.width=18, fig.height=4}
+# Combined plot for L1, L2, L3, L4 with percentages
+combined_settings <- c("L1 IDE Subset", "L2 IDE Subset", "L3 IDE Subset", "L4 IDE Subset")
+combined_results <- list()
+
+for (setting in combined_settings) {
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    
+    if (n_treat < 5) {
+        cat("Skipping", setting, "- insufficient treatment repos (n=", n_treat, ")\n")
+        next
+    }
+    
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            dyn$setting <- setting
+            combined_results[[length(combined_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+}
+
+if (length(combined_results) > 0) {
+    plot_data <- dplyr::bind_rows(combined_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    plot_data$percent_change <- 100 * (exp(plot_data$estimate) - 1)
+    
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    plot_data <- plot_data %>% distinct(setting, outcome_label, time, .keep_all = TRUE)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate, color = setting)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, position = position_dodge(width = 0.3)) +
+        geom_point(aes(shape = significant), size = 2, position = position_dodge(width = 0.3)) +
+        geom_text(aes(label = sprintf("%.1f%%", percent_change)),
+                  vjust = -0.8, size = 2, show.legend = FALSE, position = position_dodge(width = 0.3)) +
+        scale_color_manual(values = ide_subset_colors[combined_settings]) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21)) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = "Combined: L1, L2, L3, L4 IDE Subset (with Percentages)",
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            color = "Setting",
+            shape = "Significant"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12),
+            legend.position = "bottom"
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    ggsave("../plots/dynamic_effects_ide_subset_combined_l1234_with_percentages.pdf",
+           plot = p, width = 18, height = 5,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+```{r ide_subset_combined_l1_l2plus, fig.width=18, fig.height=4}
+# Combined plot for L1, L2+
+combined_settings <- c("L1 IDE Subset", "L2+ IDE Subset")
+combined_results <- list()
+
+for (setting in combined_settings) {
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    
+    if (n_treat < 5) {
+        cat("Skipping", setting, "- insufficient treatment repos (n=", n_treat, ")\n")
+        next
+    }
+    
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            dyn$setting <- setting
+            combined_results[[length(combined_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+}
+
+if (length(combined_results) > 0) {
+    plot_data <- dplyr::bind_rows(combined_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    plot_data <- plot_data %>% distinct(setting, outcome_label, time, .keep_all = TRUE)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate, color = setting)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, position = position_dodge(width = 0.3)) +
+        geom_point(aes(shape = significant), size = 2, position = position_dodge(width = 0.3)) +
+        scale_color_manual(values = ide_subset_colors[combined_settings]) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21)) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = "Combined: L1, L2+ IDE Subset",
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            color = "Setting",
+            shape = "Significant"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12),
+            legend.position = "bottom"
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    ggsave("../plots/dynamic_effects_ide_subset_combined_l1_l2plus.pdf",
+           plot = p, width = 18, height = 5,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+```{r ide_subset_combined_l1_l2plus_pct, fig.width=18, fig.height=4}
+# Combined plot for L1, L2+ with percentages
+combined_settings <- c("L1 IDE Subset", "L2+ IDE Subset")
+combined_results <- list()
+
+for (setting in combined_settings) {
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    
+    if (n_treat < 5) {
+        cat("Skipping", setting, "- insufficient treatment repos (n=", n_treat, ")\n")
+        next
+    }
+    
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            dyn$setting <- setting
+            combined_results[[length(combined_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+}
+
+if (length(combined_results) > 0) {
+    plot_data <- dplyr::bind_rows(combined_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    plot_data$percent_change <- 100 * (exp(plot_data$estimate) - 1)
+    
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    plot_data <- plot_data %>% distinct(setting, outcome_label, time, .keep_all = TRUE)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate, color = setting)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, position = position_dodge(width = 0.3)) +
+        geom_point(aes(shape = significant), size = 2, position = position_dodge(width = 0.3)) +
+        geom_text(aes(label = sprintf("%.1f%%", percent_change)),
+                  vjust = -0.8, size = 2, show.legend = FALSE, position = position_dodge(width = 0.3)) +
+        scale_color_manual(values = ide_subset_colors[combined_settings]) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21)) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = "Combined: L1, L2+ IDE Subset (with Percentages)",
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            color = "Setting",
+            shape = "Significant"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12),
+            legend.position = "bottom"
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    ggsave("../plots/dynamic_effects_ide_subset_combined_l1_l2plus_with_percentages.pdf",
+           plot = p, width = 18, height = 5,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+```{r ide_subset_combined_l12_l3plus, fig.width=18, fig.height=4}
+# Combined plot for L12, L3+
+combined_settings <- c("L12 IDE Subset", "L3+ IDE Subset")
+combined_results <- list()
+
+for (setting in combined_settings) {
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    
+    if (n_treat < 5) {
+        cat("Skipping", setting, "- insufficient treatment repos (n=", n_treat, ")\n")
+        next
+    }
+    
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            dyn$setting <- setting
+            combined_results[[length(combined_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+}
+
+if (length(combined_results) > 0) {
+    plot_data <- dplyr::bind_rows(combined_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    plot_data <- plot_data %>% distinct(setting, outcome_label, time, .keep_all = TRUE)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate, color = setting)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, position = position_dodge(width = 0.3)) +
+        geom_point(aes(shape = significant), size = 2, position = position_dodge(width = 0.3)) +
+        scale_color_manual(values = ide_subset_colors[combined_settings]) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21)) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = "Combined: L12, L3+ IDE Subset",
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            color = "Setting",
+            shape = "Significant"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12),
+            legend.position = "bottom"
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    ggsave("../plots/dynamic_effects_ide_subset_combined_l12_l3plus.pdf",
+           plot = p, width = 18, height = 5,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+```{r ide_subset_combined_l12_l3plus_pct, fig.width=18, fig.height=4}
+# Combined plot for L12, L3+ with percentages
+combined_settings <- c("L12 IDE Subset", "L3+ IDE Subset")
+combined_results <- list()
+
+for (setting in combined_settings) {
+    data_s <- build_setting_variant(panel_data, setting)
+    
+    n_treat <- length(unique(data_s$repo_name[data_s$event > 0]))
+    n_control <- length(unique(data_s$repo_name[data_s$event == 0]))
+    
+    if (n_treat < 5) {
+        cat("Skipping", setting, "- insufficient treatment repos (n=", n_treat, ")\n")
+        next
+    }
+    
+    for (y in outcome_vars) {
+        tryCatch({
+            dyn <- didimputation::did_imputation(
+                data = data_s,
+                yname = y,
+                gname = "event",
+                tname = "time",
+                idname = "repo_name",
+                first_stage = ~ age + ncloc + contributors + stars + issues | repo_name + time,
+                horizon = -6:6,
+                pretrends = -6:-2
+            )
+            dyn$outcome <- y
+            dyn$setting <- setting
+            combined_results[[length(combined_results) + 1]] <- dyn
+        }, error = function(e) {
+            cat("Warning: Skipping", setting, "for outcome", y, "- insufficient data\n")
+        })
+    }
+}
+
+if (length(combined_results) > 0) {
+    plot_data <- dplyr::bind_rows(combined_results)
+    plot_data <- plot_data[plot_data$term != "treat", ]
+    plot_data$time <- as.numeric(plot_data$term)
+    plot_data <- plot_data[plot_data$time >= -6 & plot_data$time <= 6, ]
+    
+    plot_data$outcome_label <- label_map[plot_data$outcome]
+    plot_data <- plot_data[!is.na(plot_data$outcome_label), ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = outcome_names)
+    plot_data$significant <- (plot_data$conf.low > 0) | (plot_data$conf.high < 0)
+    plot_data$linetype_sig <- ifelse(plot_data$significant, "solid", "dotted")
+    plot_data$percent_change <- 100 * (exp(plot_data$estimate) - 1)
+    
+    plot_data <- plot_data[plot_data$outcome_label %in% key_outcomes, ]
+    plot_data$outcome_label <- factor(plot_data$outcome_label, levels = key_outcomes)
+    plot_data <- plot_data %>% distinct(setting, outcome_label, time, .keep_all = TRUE)
+    
+    p <- ggplot(plot_data, aes(x = time, y = estimate, color = setting)) +
+        geom_errorbar(aes(ymin = conf.low, ymax = conf.high, linetype = linetype_sig),
+                      width = 0.4, position = position_dodge(width = 0.3)) +
+        geom_point(aes(shape = significant), size = 2, position = position_dodge(width = 0.3)) +
+        geom_text(aes(label = sprintf("%.1f%%", percent_change)),
+                  vjust = -0.8, size = 2, show.legend = FALSE, position = position_dodge(width = 0.3)) +
+        scale_color_manual(values = ide_subset_colors[combined_settings]) +
+        scale_shape_manual(values = c("TRUE" = 19, "FALSE" = 21)) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+        geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+        scale_x_continuous(breaks = -6:6) +
+        coord_cartesian(xlim = c(-6.5, 6.5)) +
+        scale_linetype_identity() +
+        labs(
+            title = "Combined: L12, L3+ IDE Subset (with Percentages)",
+            x = "Months Relative to Agent Adoption",
+            y = "Treatment Effect",
+            color = "Setting",
+            shape = "Significant"
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+            strip.text = element_text(size = 12, face = "bold"),
+            axis.text = element_text(size = 11),
+            axis.title = element_text(size = 12),
+            legend.position = "bottom"
+        ) +
+        facet_wrap(~ outcome_label, scales = "free_y", nrow = 1)
+    
+    print(p)
+    ggsave("../plots/dynamic_effects_ide_subset_combined_l12_l3plus_with_percentages.pdf",
+           plot = p, width = 18, height = 5,
+           device = CairoPDF, family = "DejaVu Sans")
+}
+```
+
+# Summary of Exported Results
+
+All analysis results have been exported to CSV files in the `../results/` directory:
+
+## Static Treatment Effects
+
+These files contain the aggregate (overall) treatment effects for each setting and outcome:
+
+- **`static_effects_base_settings.csv`**: Base settings (AF vs IF)
+- **`static_effects_full_subset.csv`**: Full subset (AF OR IF) by maturity levels
+- **`static_effects_agent_subset.csv`**: Agent subset (AF only) by maturity levels  
+- **`static_effects_ide_subset.csv`**: IDE subset (IF only) by maturity levels
+
+Columns: Setting, Outcome, Estimate, SE, CI_Lower, CI_Upper, p_value, Sig, Percent_Change
+
+## Dynamic Treatment Effects (Event Study)
+
+These files contain time-varying treatment effects for each time period relative to adoption:
+
+- **`dynamic_effects_base_settings.csv`**: Base settings (AF vs IF)
+- **`dynamic_effects_full_subset.csv`**: Full subset by maturity levels
+- **`dynamic_effects_agent_subset.csv`**: Agent subset by maturity levels
+- **`dynamic_effects_ide_subset.csv`**: IDE subset by maturity levels
+
+Columns: Setting, Outcome, Time, Estimate, SE, CI_Lower, CI_Upper, Significant, Percent_Change
+
+**Time**: Months relative to agent adoption (-6 to +6, where 0 is adoption month)
+
+**Percent_Change**: 100 * (exp(Estimate) - 1), representing the percentage change in the outcome
+
