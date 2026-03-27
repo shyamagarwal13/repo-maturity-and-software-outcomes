@@ -1,0 +1,93 @@
+{
+  "tool_name": "shared",
+  "description": "Cross-tool artifacts adopted by multiple AI coding assistants as interoperability standards.",
+  "config_folders": [],
+  "root_files": ["AGENTS.md", "AGENTS.override.md"],
+  "artifact_patterns": [
+    {
+      "pattern": "AGENTS.md",
+      "type": "file",
+      "description": "Cross-tool agent instructions following OpenAI agents.md specification",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "instructions",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": "AGENTS.md",
+      "recursive": false,
+      "primary_tool": "openai",
+      "supported_by": ["claude-code", "cursor", "github-copilot", "windsurf", "aider", "kiro", "amp", "google-idx", "openai-codex"],
+      "notes": [
+        "OpenAI agents.md specification: https://github.com/openai/agents.md",
+        "Project root and subdirectories (hierarchical)",
+        "Community-adopted standard for cross-tool interoperability",
+        "Designed to work across multiple AI coding assistants"
+      ]
+    },
+    {
+      "pattern": "AGENTS.override.md",
+      "type": "file",
+      "description": "Override file for AGENTS.md with higher precedence (OpenAI agents.md specification)",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "instructions",
+      "scope": "project",
+      "discovery_method": "exact_path",
+      "exact_path": "AGENTS.override.md",
+      "recursive": false,
+      "primary_tool": "openai",
+      "supported_by": ["openai-codex"],
+      "notes": [
+        "Part of OpenAI agents.md specification",
+        "Repository root and any subdirectory (hierarchical)",
+        "Checked before AGENTS.md in each directory",
+        "Used to override default instructions with higher precedence"
+      ]
+    },
+    {
+      "pattern": "mcp.json",
+      "type": "file",
+      "description": "Model Context Protocol server configuration for connecting AI assistants to external tools and data sources",
+      "file_type": "json",
+      "status": "stable",
+      "is_standard": true,
+      "artifact_category": "configuration",
+      "scope": "project",
+      "discovery_method": "glob",
+      "glob_pattern": "**/*mcp*.json",
+      "recursive": true,
+      "supported_by": ["claude-code", "cursor", "github-copilot", "windsurf", "vs-code"],
+      "notes": [
+        "MCP specification: https://modelcontextprotocol.io/",
+        "Tool-specific file paths:",
+        "  - Claude Code: .mcp.json (project root)",
+        "  - Cursor: .cursor/mcp.json",
+        "  - VS Code/Copilot: .vscode/mcp.json",
+        "JSON structure: { mcpServers: { server-name: { command, args, env } } }",
+        "Supports environment variable expansion (${env:VAR}, ${workspaceFolder})",
+        "Security: Project-scoped servers require user approval before use"
+      ]
+    },
+    {
+      "pattern": "{config_folder}/**/*.md",
+      "type": "directory",
+      "description": "Generic markdown files in tool config folders - non-standard artifacts discovered during analysis",
+      "file_type": "markdown",
+      "status": "stable",
+      "is_standard": false,
+      "artifact_category": "unknown",
+      "scope": "project",
+      "discovery_method": "glob",
+      "glob_pattern": "**/*.md",
+      "recursive": true,
+      "notes": [
+        "Fallback pattern for markdown files in config folders not matched by tool-specific patterns",
+        "Marked as non-standard since not officially documented",
+        "Applied after tool-specific patterns to catch custom/community artifacts",
+        "Config folder is determined by the tool's config_folders property"
+      ]
+    }
+  ]
+}
