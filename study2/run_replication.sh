@@ -7,14 +7,14 @@ cd "$ROOT_DIR"
 
 mkdir -p results plots
 
-echo "[1/3] Building maturity columns in panel data..."
-python scripts/maturity_columns.py
+# The shipped data/panel_event_monthly_final509.csv already carries the
+# maturity/matching flag columns, so no panel-preparation step is needed.
 
-echo "[2/3] Computing maturity descriptives..."
+echo "[1/2] Computing maturity descriptives..."
 python scripts/maturity_repos_descriptives.py \
   --output-table results/maturity_repos_descriptives.csv
 
-echo "[3/3] Rendering DiD notebook..."
+echo "[2/2] Rendering DiD notebook..."
 Rscript -e "rmarkdown::render('notebooks/DiffinDiff.Rmd', output_format = 'html_document')"
 
 echo "Replication run complete. Outputs are in results/ and plots/."
