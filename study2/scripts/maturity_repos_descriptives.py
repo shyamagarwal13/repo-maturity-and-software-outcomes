@@ -2,7 +2,8 @@
 """
 Descriptive stats for repos_with_details.csv by maturity: level 1 vs level 2+ (2,3,4).
 
-Uses the same full-repo maturity mapping as maturity_columns.py. Reports mean,
+Uses repos-file maturity scores (not the MSRC wide sheet used by maturity_columns.py
+since that script switched to wide last-month labels). Reports mean,
 median, min, max for numeric columns (including repo age in days from repo_created
 to a reference date, default end of November 2025), plus counts and percentages
 of L1 vs L2+ within agent_first.txt and ide_first.txt.

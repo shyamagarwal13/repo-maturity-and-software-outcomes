@@ -1,6 +1,10 @@
+did
 didimputation
+fixest
 ggplot2
 dplyr
+tidyr
+tibble
 data.table
 knitr
 kableExtra

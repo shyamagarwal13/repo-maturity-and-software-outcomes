@@ -38,7 +38,23 @@ if (!dir.exists("../plots")) {
     cat("Created plots directory\n")
 }
 
-panel_data <- fread("../data/panel_event_monthly.csv")
+panel_data <- fread("../data/panel_event_monthly_final509.csv")
+
+# # Restrict to repos where repos-file vs MSRC-wide agree on L1 vs L2+ (same coarse label)
+# l12p_stable_path <- "../../results/maturity_mapping_same_L1_L2plus_repos_with_matched_controls.txt"
+# if (!file.exists(l12p_stable_path)) {
+#   stop("Missing allowlist (knit from repo root or adjust path): ", normalizePath(l12p_stable_path, mustWork = FALSE))
+# }
+# repos_l12p_stable <- trimws(readLines(l12p_stable_path, warn = FALSE))
+# repos_l12p_stable <- repos_l12p_stable[nzchar(repos_l12p_stable)]
+# n_panel_before_l12p <- nrow(panel_data)
+# panel_data <- panel_data[panel_data$repo_name %in% repos_l12p_stable]
+# cat(
+#   "L1 vs L2+ stable allowlist: ", length(repos_l12p_stable), " repos from ",
+#   basename(l12p_stable_path), "; panel rows ", n_panel_before_l12p, " -> ",
+#   nrow(panel_data), "\n",
+#   sep = ""
+# )
 
 # Convert variables to DiD required format
 # Keep original repo names (strings) for mapping

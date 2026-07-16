@@ -5,6 +5,7 @@ This folder contains the replication materials for Study 2 (maturity-stratified 
 ## Contents
 
 - `data/`: input datasets used by scripts and notebook
+- `data/panel_event_monthly_final509.csv`: the analysis panel with final RAMP maturity labels (509 of 518 treated repositories accessible at re-collection, plus matched controls); this is the panel the paper's Study 2 results are computed from
 - `scripts/maturity_columns.py`: adds maturity/matching flags to the panel
 - `scripts/maturity_repos_descriptives.py`: maturity-level descriptive statistics
 - `notebooks/DiffinDiff.Rmd`: main DiD/event-study analysis notebook
@@ -36,11 +37,7 @@ install.packages(scan("r-packages.txt", what = "character"))
 
 Run from `study2/`:
 
-1) Prepare maturity columns in panel data:
-
-```bash
-python scripts/maturity_columns.py
-```
+1) The shipped `data/panel_event_monthly_final509.csv` already carries the maturity/matching flag columns used by the notebook, so no preparation step is required. (`scripts/maturity_columns.py` documents how these flags are constructed from the maturity labels and `matching.csv`.)
 
 2) (Optional) Compute descriptive maturity statistics:
 
@@ -48,7 +45,7 @@ python scripts/maturity_columns.py
 python scripts/maturity_repos_descriptives.py --output-table results/maturity_repos_descriptives.csv
 ```
 
-3) Render the analysis notebook:
+3) Render the analysis notebook (reads `data/panel_event_monthly_final509.csv`):
 
 ```bash
 Rscript -e "rmarkdown::render('notebooks/DiffinDiff.Rmd', output_format = 'html_document')"
@@ -69,6 +66,10 @@ The notebook writes the following key files in `results/`:
 - `dynamic_effects_ide_subset.csv`
 
 It also writes multiple PDF figures to `plots/`.
+
+## Maturity Labels and Primary Specification
+
+Treated repositories carry final RAMP maturity labels: 236 at Level 1, 210 at Level 2, 23 at Level 3, and 40 at Level 4 (509 total; 9 of the original 518 treated repositories were inaccessible at re-collection). The paper's primary specification estimates effects within the agent-first stratum (`*_agent_subset` outputs); pooled (`*_full_subset`) and IDE-first (`*_ide_subset`) estimates are reported as robustness checks.
 
 ## Notes
 

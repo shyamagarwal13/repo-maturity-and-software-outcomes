@@ -1,22 +1,40 @@
 #!/usr/bin/env python3
 """
-Add maturity level columns to panel data based on repos-file_org_maturity_scores.
+Add maturity level columns (l1–l4, l2+, subsets) to panel_event_monthly.csv.
 
-Maturity rows are usually short repo names; each maps to full owner/repo via
-agent_first.txt ∪ ide_first.txt (basename match). When the same basename appears
-under multiple owners, the maturity file adds owner__repo rows (→ owner/repo) and
-may also include a bare short-name row for one of them — those bare rows are
-skipped when disambiguation rows exist so levels are not mis-assigned.
+Labels come from the **last calendar month column** in
+`msrc_maturity_timeseries_wide.csv` (or `--label-column`), using the cell value
+as MSRC level 1–4. Wide `repo` uses owner__repo → panel owner/repo. Only repos
+that appear in agent_first.txt ∪ ide_first.txt get a level; values outside
+{1,2,3,4} (e.g. -1, NA) omit that repo from the level map.
+
+The CLI flag **`--old`** uses default inputs under **`data/data_old/`** (instead of
+**`data/`**) and maps levels from **`repos-file - November 2025_org_maturity_scores.csv`**
+(repo → level) instead of the MSRC wide sheet.
+
+**`--new`** uses default inputs under **`data/data_new/`** (still MSRC wide → levels,
+same pipeline as defaults under **`data/`**).
+
+**`--llm`** uses defaults under **`data/data_llm/`** (panel, wide, matching,
+``agent_first.txt``, ``ide_first.txt``).
+
+**`--final`** uses the same layout under **`data/data_final/`**.
+
+Legacy helper: `_build_full_repo_to_level` (repos-file CSV) is used when
+`maturity_scores_path` is set.
 """
 
-import pandas as pd  # type: ignore[import-not-found]
 import argparse
+from collections import Counter
 from pathlib import Path
+from typing import Optional, Union
+
+import pandas as pd  # type: ignore[import-not-found]
 
 BASE_DIR = Path(__file__).resolve().parent.parent  # study2/
 
 
-def _resolve_from_base(path_like: str | Path) -> str:
+def _resolve_from_base(path_like: Union[str, Path]) -> str:
     """Resolve relative paths against the replication package's `study2/` directory."""
     p = Path(path_like)
     if p.is_absolute():
@@ -69,6 +87,77 @@ def _maturity_ambiguous_short_names(df_maturity):
         else:
             bare.add(s)
     return bare & suffix_after_double_underscore
+
+
+def _wide_repo_to_panel_repo(wide_repo_cell) -> Optional[str]:
+    """Wide `owner__repo` → panel `owner/repo` (first `__` only)."""
+    if pd.isna(wide_repo_cell):
+        return None
+    s = str(wide_repo_cell).strip()
+    if not s or "__" not in s:
+        return None
+    return s.replace("__", "/", 1)
+
+
+def _pick_last_month_column(df_wide: pd.DataFrame) -> str:
+    """Rightmost column that parses as a calendar date (excluding `repo`)."""
+    candidates: list[tuple[pd.Timestamp, str]] = []
+    for c in df_wide.columns:
+        if c == "repo":
+            continue
+        try:
+            ts = pd.to_datetime(c)
+        except (ValueError, TypeError):
+            continue
+        candidates.append((pd.Timestamp(ts), str(c)))
+    if not candidates:
+        raise ValueError(
+            "No parseable date columns in MSRC wide file (need YYYY-MM-DD headers besides `repo`)."
+        )
+    candidates.sort(key=lambda x: x[0])
+    return candidates[-1][1]
+
+
+def _build_full_repo_to_level_from_msrc_wide(
+    wide_path: Union[str, Path],
+    full_repo_set: set,
+    label_column: Optional[str] = None,
+) -> tuple[dict[str, int], str]:
+    """
+    Map full owner/repo -> level in {1,2,3,4} from one column of the wide MSRC CSV.
+
+    Returns (full_repo_to_level, label_col_name_used).
+    """
+    df = pd.read_csv(wide_path, header=0)
+    if "repo" not in df.columns:
+        raise ValueError(f"MSRC wide file missing `repo` column: {wide_path}")
+
+    label_col = label_column.strip() if label_column else None
+    if label_col:
+        if label_col not in df.columns:
+            raise ValueError(
+                f"--label-column {label_col!r} not in wide file columns "
+                f"(examples: {list(df.columns)[:5]} …)"
+            )
+    else:
+        label_col = _pick_last_month_column(df)
+
+    full_repo_to_level: dict[str, int] = {}
+    for _, row in df.iterrows():
+        panel_repo = _wide_repo_to_panel_repo(row["repo"])
+        if panel_repo is None or panel_repo not in full_repo_set:
+            continue
+        raw = row[label_col]
+        if pd.isna(raw):
+            continue
+        try:
+            k = int(float(raw))
+        except (TypeError, ValueError):
+            continue
+        if k in (1, 2, 3, 4):
+            full_repo_to_level[panel_repo] = k
+
+    return full_repo_to_level, label_col
 
 
 def _full_name_from_maturity_repo_cell(repo_cell):
@@ -129,44 +218,70 @@ def _build_full_repo_to_level(df_maturity, full_repo_set):
 
 def add_maturity_columns(
     panel_path,
-    maturity_scores_path,
     matching_path,
     agent_first_path,
     ide_first_path,
+    *,
+    msrc_wide_path=None,
+    maturity_scores_path=None,
+    label_column=None,
     output_path=None,
 ):
     """
     Add maturity level columns to the panel data.
-    
+
+    Exactly one of ``msrc_wide_path`` or ``maturity_scores_path`` must be set.
+
     Args:
         panel_path: Path to panel_event_monthly.csv
-        maturity_scores_path: Path to repos-file_org_maturity_scores.csv
         matching_path: Path to matching.csv
         agent_first_path: Path to agent_first.txt (full owner/repo lines)
         ide_first_path: Path to ide_first.txt (full owner/repo lines)
-        output_path: Optional output path (defaults to overwriting input)
+        msrc_wide_path: Path to msrc_maturity_timeseries_wide.csv (default pipeline)
+        maturity_scores_path: repos-file org maturity scores CSV (legacy repo → level)
+        label_column: Optional wide CSV column name (e.g. 2025-11-01); default = last month column
+        output_path: Optional output path (defaults to overwriting input panel)
     """
-    
+    has_wide = msrc_wide_path is not None
+    has_scores = maturity_scores_path is not None
+    if has_wide == has_scores:
+        raise ValueError("Set exactly one of msrc_wide_path or maturity_scores_path")
+
     print("Loading data files...")
-    df_panel = pd.read_csv(panel_path)
-    df_maturity = pd.read_csv(maturity_scores_path)
+    df_panel = pd.read_csv(panel_path, low_memory=False)
     df_matching = pd.read_csv(matching_path)
     full_repo_set = _load_full_repo_names(agent_first_path, ide_first_path)
-    
+
     print(f"Panel data: {len(df_panel)} rows")
-    print(f"Maturity scores: {len(df_maturity)} repos")
     print(f"Matching data: {len(df_matching)} rows")
     print(f"Full owner/repo in agent_first ∪ ide_first: {len(full_repo_set)}")
-    
-    # Step 1: full owner/repo -> level (maturity short names resolved via agent/ide lists)
-    full_repo_to_level = _build_full_repo_to_level(df_maturity, full_repo_set)
-    print(f"\nFull names with a maturity level: {len(full_repo_to_level)}")
-    
-    # Count repos per level
-    level_counts = df_maturity['level'].value_counts().sort_index()
-    print("\nMaturity level distribution (short names in maturity file):")
-    for level in sorted(level_counts.index):
-        print(f"  Level {level}: {level_counts[level]} repos")
+
+    # Step 1: full owner/repo -> level (MSRC wide last month, or legacy repos-file)
+    if maturity_scores_path is not None:
+        print(f"Maturity source (repos-file): {maturity_scores_path}")
+        df_maturity = pd.read_csv(maturity_scores_path)
+        print(f"Maturity score rows: {len(df_maturity)}")
+        full_repo_to_level = _build_full_repo_to_level(df_maturity, full_repo_set)
+        print(f"\nFull names with a maturity level (agent∪ide map): {len(full_repo_to_level)}")
+        level_counts = df_maturity["level"].value_counts().sort_index()
+        print("\nMaturity level distribution (short names in repos-file CSV):")
+        for level in sorted(level_counts.index):
+            print(f"  Level {level}: {level_counts[level]} repos")
+    else:
+        print(f"Maturity source (MSRC wide): {msrc_wide_path}")
+        full_repo_to_level, label_col_used = _build_full_repo_to_level_from_msrc_wide(
+            msrc_wide_path, full_repo_set, label_column=label_column
+        )
+        print(f"\nLabel column: {label_col_used!r}")
+        print(
+            f"Full names with MSRC level 1–4 in that column (and in agent∪ide): "
+            f"{len(full_repo_to_level)}"
+        )
+
+        level_counts = Counter(full_repo_to_level.values())
+        print("\nMaturity level distribution (wide last-month labels, agent∪ide only):")
+        for level in sorted(level_counts.keys()):
+            print(f"  Level {level}: {level_counts[level]} repos")
 
     repos_by_level = {
         L: {fn for fn, lv in full_repo_to_level.items() if lv == L}
@@ -452,51 +567,165 @@ def add_maturity_columns(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Add maturity level columns (l1, l2, l3, l4) to panel data based on treatment repo maturity levels"
+        description=(
+            "Add maturity level columns (l1, l2, l3, l4, l2+, subsets) from "
+            "MSRC wide last month (default data/ or --new data/data_new/ or "
+            "--llm data/data_llm/ or --final data/data_final/), or --old from "
+            "data/data_old/ with repos-file levels."
+        )
+    )
+    parser.add_argument(
+        "--llm",
+        action="store_true",
+        help=(
+            "Use data/data_llm/ defaults (panel, wide, matching, agent_first, ide_first)"
+        ),
+    )
+    parser.add_argument(
+        "--final",
+        action="store_true",
+        help=(
+            "Use data/data_final/ defaults (panel, wide, matching, agent_first, ide_first)"
+        ),
+    )
+    parser.add_argument(
+        "--old",
+        action="store_true",
+        help=(
+            "Use data/data_old/ defaults (panel, matching, lists, maturity CSV) and "
+            "repos-file repo→level mapping instead of MSRC wide time series."
+        ),
+    )
+    parser.add_argument(
+        "--new",
+        action="store_true",
+        help=(
+            "Use data/data_new/ defaults (panel, matching, lists, MSRC wide CSV); "
+            "same wide time-series labeling as plain defaults, different data directory."
+        ),
     )
     parser.add_argument(
         "--panel",
-        default="data/panel_event_monthly.csv",
-        help="Path to panel_event_monthly.csv"
+        default=None,
+        help="Path to panel_event_monthly.csv (default depends on --new / --old / neither)",
+    )
+    parser.add_argument(
+        "--msrc-wide",
+        dest="msrc_wide",
+        default=None,
+        help="Path to msrc_maturity_timeseries_wide.csv (ignored with --old; under data/data_new/ with --new)",
     )
     parser.add_argument(
         "--maturity-scores",
-        default="data/repos-file - November 2025_org_maturity_scores.csv",
-        help="Path to repos-file_org_maturity_scores.csv"
+        dest="maturity_scores",
+        default=None,
+        help=(
+            "Path to repos-file org maturity_scores.csv "
+            "(default with --old: data_old/repos-file - November 2025_org_maturity_scores.csv)"
+        ),
+    )
+    parser.add_argument(
+        "--label-column",
+        dest="label_column",
+        default=None,
+        help="Wide CSV column to use (e.g. 2025-11-01). Default: last date column (ignored with --old).",
     )
     parser.add_argument(
         "--matching",
-        default="data/matching.csv",
-        help="Path to matching.csv"
+        default=None,
+        help="Path to matching.csv",
     )
     parser.add_argument(
         "--agent-first",
         dest="agent_first",
-        default="data/agent_first.txt",
-        help="Path to agent_first.txt (full owner/repo, one per line)"
+        default=None,
+        help="Path to agent_first.txt",
     )
     parser.add_argument(
         "--ide-first",
         dest="ide_first",
-        default="data/ide_first.txt",
-        help="Path to ide_first.txt (full owner/repo, one per line)"
+        default=None,
+        help="Path to ide_first.txt",
     )
     parser.add_argument(
         "--output",
         default=None,
-        help="Output path (defaults to overwriting --panel)"
+        help="Output path (defaults to overwriting --panel)",
     )
-    
+
     args = parser.parse_args()
-    
-    add_maturity_columns(
-        panel_path=_resolve_from_base(args.panel),
-        maturity_scores_path=_resolve_from_base(args.maturity_scores),
-        matching_path=_resolve_from_base(args.matching),
-        agent_first_path=_resolve_from_base(args.agent_first),
-        ide_first_path=_resolve_from_base(args.ide_first),
-        output_path=args.output,
-    )
+
+    mode_flags = sum(bool(x) for x in (args.old, args.new, args.llm, args.final))
+    if mode_flags > 1:
+        raise SystemExit("Use only one of --old, --new, --llm, or --final.")
+
+    if not args.old and args.maturity_scores:
+        raise SystemExit(
+            "Use --maturity-scores only together with --old. "
+            "Default run uses MSRC wide (or pass --msrc-wide)."
+        )
+
+    if args.old:
+        subdir = Path("data/data_old")
+    elif args.final:
+        subdir = Path("data/data_final")
+    elif args.llm:
+        subdir = Path("data/data_llm")
+    elif args.new:
+        subdir = Path("data/data_new")
+    else:
+        subdir = Path("data")
+
+    def pick(cli: Optional[str], filename: str) -> str:
+        if cli:
+            return _resolve_from_base(cli)
+        return str(BASE_DIR / subdir / filename)
+
+    panel_path = pick(args.panel, "panel_event_monthly.csv")
+    matching_path = pick(args.matching, "matching.csv")
+    agent_first_path = pick(args.agent_first, "agent_first.txt")
+    ide_first_path = pick(args.ide_first, "ide_first.txt")
+
+    if args.old and args.label_column:
+        print("Note: --label-column ignored with --old (repos-file defines levels).\n")
+
+    output_path_res = _resolve_from_base(args.output) if args.output else None
+
+    if args.old:
+        if args.msrc_wide:
+            raise SystemExit("Do not combine --msrc-wide with --old (mapping uses repos-file only).")
+        maturity_scores_default = "repos-file - November 2025_org_maturity_scores.csv"
+        scores_path = pick(args.maturity_scores, maturity_scores_default)
+        add_maturity_columns(
+            panel_path,
+            matching_path,
+            agent_first_path,
+            ide_first_path,
+            maturity_scores_path=scores_path,
+            output_path=output_path_res,
+        )
+    else:
+        wide_name = (
+            "msrc_maturity_timeseries_llm_wide.csv"
+            if (args.llm or args.final)
+            else "msrc_maturity_timeseries_wide.csv"
+        )
+        wide_path = pick(args.msrc_wide, wide_name)
+        if args.llm or args.final:
+            mode = "final" if args.final else "llm"
+            print(
+                f"{mode.upper()} mode: panel={panel_path!r} → "
+                f"{output_path_res or panel_path!r}, wide={wide_path!r}\n"
+            )
+        add_maturity_columns(
+            panel_path,
+            matching_path,
+            agent_first_path,
+            ide_first_path,
+            msrc_wide_path=wide_path,
+            label_column=args.label_column,
+            output_path=output_path_res,
+        )
 
 
 if __name__ == "__main__":
