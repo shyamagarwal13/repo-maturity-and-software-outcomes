@@ -5,7 +5,7 @@ This folder contains the replication materials for Study 2 (maturity-stratified 
 ## Contents
 
 - `data/`: input datasets used by scripts and notebook
-- `data/panel_event_monthly_final509.csv`: the analysis panel with final RAMP maturity labels (509 of 518 treated repositories accessible at re-collection, plus matched controls); this is the panel the paper's Study 2 results are computed from
+- `data/panel_event_monthly.csv`: the analysis panel with final RAMP maturity labels (509 of 518 treated repositories accessible at re-collection, plus matched controls); this is the panel the paper's Study 2 results are computed from
 - `scripts/maturity_columns.py`: adds maturity/matching flags to the panel
 - `scripts/maturity_repos_descriptives.py`: maturity-level descriptive statistics
 - `notebooks/DiffinDiff.Rmd`: main DiD/event-study analysis notebook
@@ -37,7 +37,7 @@ install.packages(scan("r-packages.txt", what = "character"))
 
 Run from `study2/`:
 
-1) The shipped `data/panel_event_monthly_final509.csv` already carries the maturity/matching flag columns used by the notebook, so no preparation step is required. (`scripts/maturity_columns.py` documents how these flags are constructed from the maturity labels and `matching.csv`.)
+1) The shipped `data/panel_event_monthly.csv` already carries the maturity/matching flag columns used by the notebook, so no preparation step is required. (`scripts/maturity_columns.py` documents how these flags are constructed from the maturity labels and `matching.csv`.)
 
 2) (Optional) Compute descriptive maturity statistics:
 
@@ -45,7 +45,7 @@ Run from `study2/`:
 python scripts/maturity_repos_descriptives.py --output-table results/maturity_repos_descriptives.csv
 ```
 
-3) Render the analysis notebook (reads `data/panel_event_monthly_final509.csv`):
+3) Render the analysis notebook (reads `data/panel_event_monthly.csv`):
 
 ```bash
 Rscript -e "rmarkdown::render('notebooks/DiffinDiff.Rmd', output_format = 'html_document')"

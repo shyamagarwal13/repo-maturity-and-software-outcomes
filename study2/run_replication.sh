@@ -7,7 +7,7 @@ cd "$ROOT_DIR"
 
 mkdir -p results plots
 
-# The shipped data/panel_event_monthly_final509.csv already carries the
+# The shipped data/panel_event_monthly.csv already carries the
 # maturity/matching flag columns, so no panel-preparation step is needed.
 
 echo "[1/2] Computing maturity descriptives..."
