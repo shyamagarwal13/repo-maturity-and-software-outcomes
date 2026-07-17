@@ -21,7 +21,49 @@ from src.report_generator import (
     _markdown_to_html,
     fig_to_base64,
     generate_pdf_report,
+    generate_recommendations,
 )
+
+
+# ============================================================================
+# Test fixtures for generate_recommendations
+# ============================================================================
+
+def _score_for_recs(
+    overall_level=2,
+    level_primary=None,
+    coherence_flags=None,
+    category_counts=None,
+    artifact_count=None,
+):
+    """Build a minimal MaturityScore that exercises generate_recommendations.
+
+    Only the fields that generate_recommendations reads need realistic
+    values; everything else gets a neutral default.
+    """
+    if level_primary is None:
+        level_primary = {2: 0, 3: 0, 4: 0}
+    if coherence_flags is None:
+        coherence_flags = []
+    if category_counts is None:
+        category_counts = {cat: 0 for cat in CATEGORY_NAMES}
+    if artifact_count is None:
+        artifact_count = sum(category_counts.values())
+
+    level_evidence = {
+        lvl: {"primary": level_primary.get(lvl, 0), "secondary": 0}
+        for lvl in (2, 3, 4)
+    }
+    return MaturityScore(
+        overall_level=overall_level,
+        overall_label=f"L{overall_level}",
+        confidence=1.0,
+        tools_detected=[],
+        artifact_count=artifact_count,
+        level_evidence=level_evidence,
+        category_counts=category_counts,
+        coherence_flags=coherence_flags,
+    )
 
 
 # ============================================================================
@@ -62,7 +104,6 @@ def _make_score(with_fc=True) -> MaturityScore:
             CoherenceFlag("L2 foundation", "green", "L2 grounding present"),
             CoherenceFlag("L3 builds on L2", "green", "Progressive adoption"),
         ],
-        recommendations=["Consider adding L4 flow artifacts."],
         file_classifications=fc_df,
     )
 
@@ -250,6 +291,7 @@ class TestTemplateRendering:
             primary_tools=["claude-code", "cursor"],
             llm_report=None,
             llm_report_html=None,
+            recommendations=generate_recommendations(score),
         )
 
         # Title page
@@ -286,8 +328,10 @@ class TestTemplateRendering:
         assert "L2 foundation" in html
         assert "L3 builds on L2" in html
 
-        # Recommendations
-        assert "Consider adding L4 flow artifacts" in html
+        # Recommendations: _make_score() is L3 with no L4 artifacts, so the
+        # advancement rec ("Advance to L4 ...") fires.
+        assert "Recommendations" in html
+        assert "Advance to L4" in html
 
     def test_template_renders_llm_section_when_provided(self):
         from jinja2 import Template
@@ -497,7 +541,7 @@ class TestComputeToolBreakdown:
             artifact_count=101,
             level_evidence={2: {"primary": 101, "secondary": 0}},
             category_counts={"rules": 100, "configuration": 1},
-            coherence_flags=[], recommendations=[],
+            coherence_flags=[],
             file_classifications=fc_df,
         )
         result = _compute_tool_breakdown(score)
@@ -520,7 +564,7 @@ class TestComputeToolBreakdown:
             confidence=0.7, tools_detected=["claude-code"],
             artifact_count=2,
             level_evidence={}, category_counts={},
-            coherence_flags=[], recommendations=[],
+            coherence_flags=[],
             file_classifications=fc_df,
         )
         result = _compute_tool_breakdown(score)
@@ -547,10 +591,154 @@ class TestComputeToolBreakdown:
             confidence=0.7, tools_detected=["claude-code", "tiny-tool"],
             artifact_count=51,
             level_evidence={}, category_counts={},
-            coherence_flags=[], recommendations=[],
+            coherence_flags=[],
             file_classifications=fc_df,
         )
         result = _compute_tool_breakdown(score)
         assert result[0]["tool"] == "claude-code"
         assert result[0]["is_negligible"] is False
         assert result[1]["is_negligible"] is True
+
+
+# ============================================================================
+# Test generate_recommendations
+# ============================================================================
+
+class TestGenerateRecommendations:
+
+    def test_l1_recommends_grounding(self):
+        recs = generate_recommendations(_score_for_recs(overall_level=1))
+        assert len(recs) >= 1
+        assert any("rules" in r.lower() or "instructions" in r.lower() for r in recs)
+
+    def test_l2_recommends_agents(self):
+        cats = {"rules": 3, "configuration": 2,
+                **{c: 0 for c in CATEGORY_NAMES if c not in ("rules", "configuration")}}
+        recs = generate_recommendations(_score_for_recs(
+            overall_level=2,
+            level_primary={2: 5, 3: 0, 4: 0},
+            category_counts=cats,
+        ))
+        assert any("agent" in r.lower() or "l3" in r.lower() for r in recs)
+
+    def test_concentration_warning(self):
+        cats = {cat: 0 for cat in CATEGORY_NAMES}
+        cats["commands"] = 20
+        cats["rules"] = 1
+        recs = generate_recommendations(_score_for_recs(
+            overall_level=3,
+            level_primary={2: 1, 3: 20, 4: 0},
+            category_counts=cats,
+        ))
+        assert any("concentrated" in r.lower() for r in recs)
+
+    def test_red_l3_without_l2_creates_recommendation(self):
+        recs = generate_recommendations(_score_for_recs(
+            overall_level=3,
+            level_primary={2: 0, 3: 10, 4: 0},
+            coherence_flags=[CoherenceFlag("L3 without L2", "red", "anomaly")],
+        ))
+        assert any("grounding" in r.lower() or "l2" in r.lower() for r in recs)
+
+    def test_red_l4_without_l3_creates_recommendation(self):
+        recs = generate_recommendations(_score_for_recs(
+            overall_level=4,
+            level_primary={2: 5, 3: 0, 4: 2},
+            coherence_flags=[CoherenceFlag("L4 without L3", "red", "anomaly")],
+        ))
+        assert any("agent" in r.lower() and ("l3" in r.lower() or "orchestration" in r.lower())
+                   for r in recs)
+
+    def test_yellow_l2_foundation_creates_recommendation(self):
+        cats = {"agents": 5, **{c: 0 for c in CATEGORY_NAMES if c != "agents"}}
+        recs = generate_recommendations(_score_for_recs(
+            overall_level=3,
+            level_primary={2: 0, 3: 5, 4: 0},
+            coherence_flags=[CoherenceFlag("L2 foundation", "yellow", "embedded only")],
+            category_counts=cats,
+        ))
+        assert any("extracting" in r.lower() or "claude.md" in r.lower() or "cursorrules" in r.lower()
+                   for r in recs)
+
+    def test_l3_recommends_l4(self):
+        cats = {cat: 0 for cat in CATEGORY_NAMES}
+        cats["agents"] = 3
+        recs = generate_recommendations(_score_for_recs(
+            overall_level=3,
+            level_primary={2: 1, 3: 3, 4: 0},
+            category_counts=cats,
+        ))
+        assert any("flow" in r.lower() or "l4" in r.lower() for r in recs)
+
+    def test_grounding_rec_requires_red_status(self):
+        """Yellow 'L3 without L2' or unrelated red flags must NOT trigger
+        the standalone-grounding-files recommendation."""
+        recs_yellow = generate_recommendations(_score_for_recs(
+            overall_level=3,
+            level_primary={2: 0, 3: 5, 4: 0},
+            coherence_flags=[CoherenceFlag("L3 without L2", "yellow", "x")],
+        ))
+        assert not any("standalone grounding files" in r.lower() for r in recs_yellow)
+
+        recs_unrelated = generate_recommendations(_score_for_recs(
+            overall_level=3,
+            level_primary={2: 5, 3: 5, 4: 0},
+            coherence_flags=[CoherenceFlag("Some other check", "red", "x")],
+        ))
+        assert not any("standalone grounding files" in r.lower() for r in recs_unrelated)
+
+    def test_l2_advancement_suppressed_when_agents_or_commands_present(self):
+        """The 'Advance to L3' rec must NOT fire if either agents or commands
+        is non-zero."""
+        cats_a = {cat: 0 for cat in CATEGORY_NAMES}
+        cats_a["agents"] = 1
+        cats_a["rules"] = 5
+        recs = generate_recommendations(_score_for_recs(
+            overall_level=2,
+            level_primary={2: 5, 3: 0, 4: 0},
+            category_counts=cats_a,
+        ))
+        assert not any("advance to l3" in r.lower() for r in recs)
+
+        cats_c = {cat: 0 for cat in CATEGORY_NAMES}
+        cats_c["commands"] = 1
+        cats_c["rules"] = 5
+        recs = generate_recommendations(_score_for_recs(
+            overall_level=2,
+            level_primary={2: 5, 3: 0, 4: 0},
+            category_counts=cats_c,
+        ))
+        assert not any("advance to l3" in r.lower() for r in recs)
+
+    def test_concentration_threshold_boundaries(self):
+        """Concentration warning fires only when (max/total) > 0.8 AND total >= 5."""
+        # 4/5 = 0.8 → NOT > 0.8 → no warning
+        cats = {cat: 0 for cat in CATEGORY_NAMES}
+        cats["commands"] = 4
+        cats["rules"] = 1
+        recs = generate_recommendations(_score_for_recs(
+            overall_level=3,
+            level_primary={2: 1, 3: 4, 4: 0},
+            category_counts=cats,
+        ))
+        assert not any("concentrated" in r.lower() for r in recs)
+
+        # 5/5 = 1.0 → > 0.8 → warning fires
+        cats2 = {cat: 0 for cat in CATEGORY_NAMES}
+        cats2["commands"] = 5
+        recs2 = generate_recommendations(_score_for_recs(
+            overall_level=3,
+            level_primary={2: 0, 3: 5, 4: 0},
+            category_counts=cats2,
+        ))
+        assert any("concentrated" in r.lower() for r in recs2)
+
+        # total=4 (below 5) — no warning even at 100% concentration
+        cats3 = {cat: 0 for cat in CATEGORY_NAMES}
+        cats3["commands"] = 4
+        recs3 = generate_recommendations(_score_for_recs(
+            overall_level=3,
+            level_primary={2: 0, 3: 4, 4: 0},
+            category_counts=cats3,
+        ))
+        assert not any("concentrated" in r.lower() for r in recs3)

@@ -28,6 +28,7 @@ import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
 from src.artifact_config_loader import load_json_configs, load_shared_config
+from src.artifact_filtering import is_boilerplate, is_in_doc_folder
 from src.embedding_generator import (
     DEFAULT_TASK_PREFIX,
     generate_embeddings_batch,
@@ -66,9 +67,9 @@ CATEGORY_TEMPLATES = {
         "Not a multi-step orchestration or policy document — just one atomic, reusable operation like commit, review, or format."
     ),
     "flows": (
-        "A multi-phase orchestration plan that coordinates several agents or steps through a complex workflow. "
-        "Contains tables with worker assignments, timeline phases, and dependency mapping between stages. "
-        "Agents are spawned, monitored, and their outputs synthesized — this is a project execution blueprint, not a set of rules or policies."
+        "An executable orchestration plan authored to be consumed by an AI runner — names specific phases with identifiers, assigns named agents or workers to each phase, declares explicit dependency edges between stages, and lists per-phase acceptance/exit criteria. "
+        "The file directly drives execution: a runner could parse it and dispatch work. "
+        "NOT a design document explaining how orchestration works, NOT a tutorial teaching about workflows, NOT a roadmap or release schedule, NOT a code recipe describing how an event sequence behaves, NOT a doc page about multi-agent systems — those describe orchestration; this IS an orchestration."
     ),
     "rules": (
         "A policy document of imperative directives that govern how an AI assistant must behave in a codebase. "
@@ -96,9 +97,15 @@ CATEGORY_TEMPLATES = {
         "Contains no prose paragraphs or natural language instructions — purely structured data for tool or environment configuration."
     ),
     "session-logs": (
-        "A retrospective record of work completed by an AI agent, capturing task outcomes, status transitions, and timestamped activity. "
-        "Contains structured metadata like status, acceptance criteria checklists, files modified, commits made, or transition logs with actor attribution. "
-        "Backward-looking and observational — documents what was done and when, unlike rules that prescribe behavior or flows that plan future work."
+        "An actual log entry produced by a specific AI agent run — captures concrete artifacts of that run: a run/session/task identifier, real timestamps of state transitions that occurred, the names of files that were actually modified, real commit SHAs that were made, the agent's actor identity, and the outcome of acceptance criteria. "
+        "The file is the OUTPUT of an executed agent run — a forensic record that exists because the run happened. "
+        "NOT a documentation page describing how session logs work, NOT a tutorial about agent memory or logging, NOT an observability guide, NOT a state-machine reference manual, NOT a tracing-system explanation, NOT a retrospective design discussion, NOT an event-sourcing recipe — those describe logs; this IS a log."
+    ),
+    "general-documentation": (
+        "User-facing software project documentation written for end users, contributors, or operators of a non-AI software system. "
+        "Covers installation, API reference, usage tutorials, performance characteristics, troubleshooting, FAQs, design rationale, deployment guides, and operational concerns. "
+        "Describes how the project itself works — does not configure, instruct, or orchestrate any AI assistant or agent. "
+        "Not authored by an AI tool, not consumed by an AI tool: ordinary technical writing for humans about a software product."
     ),
 }
 
@@ -117,14 +124,93 @@ CATEGORY_TO_LEVEL: Dict[str, MaturityLevel] = {
     "session-logs": MaturityLevel.L4,
 }
 
-# "instructions" from Artifacts/*.json maps to rules (L2)
+# Dialect bridge: each Artifacts/*.json author chose category names that
+# mirror their tool's terminology, so artifact_category uses a wider
+# vocabulary than CATEGORY_TEMPLATES. This dict translates every dialect
+# value not already in CATEGORY_TO_LEVEL into a template category, so
+# tool detection produces level evidence consistently across tools.
+# Mappings are grounded in each pattern's description in Artifacts/*.json.
 ARTIFACT_CATEGORY_TO_TEMPLATE = {
-    "instructions": "rules",
-    "unknown": None,
+    # → rules (L2): grounding / behavioral instructions for the AI
+    "instructions": "rules",   # claude-code, github-copilot, shared (CLAUDE.md, copilot-instructions.md)
+    "context":      "rules",   # gemini-cli (GEMINI.md persistent project context)
+    "steering":     "rules",   # kiro (.kiro/steering/*.md guides Kiro's behavior)
+    "guidelines":   "rules",   # jetbrains-ai (Junie coding standards & best practices)
+
+    # → commands (L3): short reusable prompt templates
+    "prompts":      "commands",  # github-copilot (.github/prompts/*.prompt.md)
+
+    # → agents (L3): named agent/persona definitions
+    "microagents":  "agents",    # openhands (.openhands/microagents/*.md)
+
+    # → flows (L4): event/task-driven agent orchestration
+    "workflows":    "flows",     # windsurf (.windsurf/workflows/*.md Cascade task sequences)
+    "hooks":        "flows",     # kiro (.kiro/hooks/*.hook automated event→agent-action triggers)
+
+    # Sentinel: explicit drop
+    "unknown":      None,
 }
 
 # Threshold for "within threshold" category attribution
 HYBRID_THRESHOLD = 0.03
+
+
+@dataclass(frozen=True)
+class ScoringConfig:
+    """Tunable thresholds and decision rules for the semantic signals.
+
+    Files whose semantic top-1 cosine score or top1-top2 margin fall below
+    the per-signal gates contribute no semantic evidence — their score
+    columns are still populated for diagnostics, but `content_primary` /
+    `path_primary` is set to None, so they don't drive level attribution
+    through the semantic branches of `combine_signals`. Tool-based
+    attribution (Artifacts JSON pattern matching) is unaffected.
+
+    Optional sensitivity knobs:
+    - cross_level_disagreement_demote: off by default. When enabled, a
+      cross-level disagreement between the content and path categories
+      is resolved by picking the LOWER-level category (a conservative
+      sensitivity variant). With the default (False), content wins on
+      any disagreement — content embeddings are the richer signal and
+      this avoids the asymmetric downward bias of always demoting.
+    - strict_cap_to_l1_without_tool_attribution: on by default. The
+      repo's overall_level is capped at L1 unless at least one file's
+      tool_category resolved to a leveled template via Artifacts/*.json.
+      Semantic content/path evidence alone cannot promote a repo. Turn
+      off to recover the un-capped semantic level for sensitivity work.
+    - filter_boilerplate: on by default. Drops project-boilerplate files
+      (README, LICENSE, PR/issue templates, …) before / during signal
+      combination via the shared is_boilerplate predicate. The filter is
+      applied early in score_from_output_dir (saves classification work)
+      and defensively in combine_signals (catches direct callers, e.g.
+      sensitivity notebooks, that skip the early stage). Turn off only
+      for diagnostics on the unfiltered input.
+    - ignore_doc_folders: on by default. Drops every file whose path
+      contains a segment named doc/docs/documentation (case-insensitive)
+      before signal combination — same drop pattern as filter_boilerplate,
+      gated by is_in_doc_folder. Motivation: empirical validation
+      (notebooks/exploratory/documentation_folder_validation.ipynb) shows
+      that 61.5% of MD files in the msrc cohort live under doc folders,
+      and that virtually all (~2,234) artifact-category false positives
+      there are driven by content+path semantic matches on doc content
+      (every in-doc FP suspect had tool_name='unknown'). Turn off only
+      for diagnostics on the unfiltered input — note this will reintroduce
+      the FP surface measured in §3 of the validation notebook.
+    """
+
+    tau_content_score: float = 0.70
+    tau_content_margin: float = 0.02
+    tau_path_score: float = 0.70
+    tau_path_margin: float = 0.02
+    hybrid_threshold: float = HYBRID_THRESHOLD
+
+    cross_level_disagreement_demote: bool = False
+    strict_cap_to_l1_without_tool_attribution: bool = True
+    filter_boilerplate: bool = True
+    ignore_doc_folders: bool = True
+
+
+DEFAULT_CONFIG = ScoringConfig()
 
 
 # ============================================================================
@@ -162,6 +248,16 @@ class FileClassification:
     assigned_category: Optional[str] = None
     assigned_maturity_level: Optional[int] = None
 
+    # LLM overlay (populated only when score_from_output_dir is called with
+    # llm_overlay + blob_hash_for_files). aime_assigned_category preserves
+    # the multi-signal label for side-by-side comparison; assigned_category
+    # is overwritten by the LLM verdict (or set to None when llm_cut=True).
+    aime_assigned_category: Optional[str] = None
+    blob_hash: Optional[str] = None
+    llm_rationale: Optional[str] = None
+    llm_cut: bool = False
+    llm_cut_reason: Optional[str] = None
+
     def to_dict(self) -> dict:
         """Convert to flat dict for DataFrame construction."""
         return {
@@ -183,6 +279,11 @@ class FileClassification:
             "signals_agree": self.signals_agree,
             "assigned_category": self.assigned_category,
             "assigned_maturity_level": self.assigned_maturity_level,
+            "aime_assigned_category": self.aime_assigned_category,
+            "blob_hash": self.blob_hash,
+            "llm_rationale": self.llm_rationale,
+            "llm_cut": self.llm_cut,
+            "llm_cut_reason": self.llm_cut_reason,
         }
 
 
@@ -211,10 +312,24 @@ class MaturityScore:
     category_counts: Dict[str, int]  # primary counts per category
 
     coherence_flags: List[CoherenceFlag]
-    recommendations: List[str]
 
     # Detailed per-file results
     file_classifications: Optional[pd.DataFrame] = None
+
+    # Diagnostics — number of files dropped by the boilerplate filter
+    # before classification (README, LICENSE, PR templates, etc.).
+    boilerplate_filtered: int = 0
+
+    # Diagnostics — number of files dropped because their path lives inside
+    # a doc/docs/documentation segment (config.ignore_doc_folders).
+    doc_folder_filtered: int = 0
+
+    # True iff at least one file was assigned to a leveled category by the
+    # tool-detection signal (Artifacts/*.json pattern matching). Used by
+    # downstream "strict mode" evaluation in notebook 8 to distinguish
+    # repos with confirmed AI tool presence from repos whose level is
+    # driven entirely by semantic (content/path) evidence.
+    has_leveled_tool_attribution: bool = False
 
     def to_dict(self) -> dict:
         """Export as JSON-serializable dict."""
@@ -230,7 +345,9 @@ class MaturityScore:
                 {"check": f.check, "status": f.status, "message": f.message}
                 for f in self.coherence_flags
             ],
-            "recommendations": self.recommendations,
+            "boilerplate_filtered": self.boilerplate_filtered,
+            "doc_folder_filtered": self.doc_folder_filtered,
+            "has_leveled_tool_attribution": self.has_leveled_tool_attribution,
         }
 
 
@@ -334,7 +451,14 @@ def _match_artifact_category(
     candidates += [e for e in pattern_lookup if e["tool_name"] == "shared"]
     candidates += [e for e in pattern_lookup if e["tool_name"] not in (tool_name, "shared")]
 
+    # Skip placeholder/catch-all patterns whose `artifact_category` is the
+    # sentinel "unknown" (e.g. shared `**/*.md` used by the collector for
+    # bulk MD discovery). Otherwise those would shadow specific patterns
+    # like `**/CLAUDE.md`, `**/GEMINI.md` which live in tool-specific
+    # configs that the candidate ordering visits *after* shared.
     for entry in candidates:
+        if entry.get("artifact_category") == "unknown":
+            continue
         if entry["match_type"] == "exact" and artifact_path == entry["match_value"]:
             return entry["artifact_category"]
         if entry["match_type"] == "glob":
@@ -365,9 +489,13 @@ def classify_by_tool_detection(
         artifact_path = row.get("artifact_path", "")
         file_id = row.get("file_id", "")
 
-        category = None
-        if tool_name != "unknown":
-            category = _match_artifact_category(artifact_path, tool_name, pattern_lookup)
+        # Always try path-pattern matching, even when the collector tagged the
+        # file as 'unknown'. The collector only attaches a tool_name for files
+        # matching an exact_path; nested canonical files (e.g. app/.../AGENTS.md,
+        # nested CLAUDE.md/GEMINI.md) arrive as 'unknown' and would otherwise
+        # be silently dropped from tool attribution. The pattern lookup itself
+        # is the source of truth.
+        category = _match_artifact_category(artifact_path, tool_name, pattern_lookup)
 
         results.append({"file_id": file_id, "tool_category": category})
 
@@ -407,6 +535,7 @@ def classify_by_path(
     model,
     template_embeddings: np.ndarray,
     task_prefix: str = DEFAULT_TASK_PREFIX,
+    config: ScoringConfig = DEFAULT_CONFIG,
 ) -> pd.DataFrame:
     """Classify files by embedding their paths against category templates.
 
@@ -415,6 +544,8 @@ def classify_by_path(
         model: Loaded SentenceTransformer model.
         template_embeddings: Category template embeddings (9 x dim).
         task_prefix: Task prefix for nomic models.
+        config: Scoring thresholds — files below tau_path_score or with
+            margin below tau_path_margin have path_primary set to None.
 
     Returns:
         DataFrame with columns: path_primary, path_primary_score,
@@ -439,12 +570,16 @@ def classify_by_path(
     for i in range(len(artifact_paths)):
         top1_idx = sorted_idx[i, 0]
         top2_idx = sorted_idx[i, 1]
+        top1_score = float(path_sim[i, top1_idx])
+        top2_score = float(path_sim[i, top2_idx])
+        margin = top1_score - top2_score
+        gated = top1_score < config.tau_path_score or margin < config.tau_path_margin
         rows.append({
-            "path_primary": CATEGORY_NAMES[top1_idx],
-            "path_primary_score": float(path_sim[i, top1_idx]),
+            "path_primary": None if gated else CATEGORY_NAMES[top1_idx],
+            "path_primary_score": top1_score,
             "path_secondary": CATEGORY_NAMES[top2_idx],
-            "path_secondary_score": float(path_sim[i, top2_idx]),
-            "path_margin": float(path_sim[i, top1_idx] - path_sim[i, top2_idx]),
+            "path_secondary_score": top2_score,
+            "path_margin": margin,
         })
 
     return pd.DataFrame(rows)
@@ -457,12 +592,15 @@ def classify_by_path(
 def classify_by_content(
     file_embeddings: np.ndarray,
     template_embeddings: np.ndarray,
+    config: ScoringConfig = DEFAULT_CONFIG,
 ) -> pd.DataFrame:
     """Classify files by their content embeddings against category templates.
 
     Args:
         file_embeddings: 2D array (N x dim) of file content embeddings.
         template_embeddings: Category template embeddings (9 x dim).
+        config: Scoring thresholds — files below tau_content_score or with
+            margin below tau_content_margin have content_primary set to None.
 
     Returns:
         DataFrame with columns: content_primary, content_primary_score,
@@ -486,21 +624,25 @@ def classify_by_content(
         top1_idx = sorted_idx[i, 0]
         top2_idx = sorted_idx[i, 1]
         top1_score = float(content_sim[i, top1_idx])
+        top2_score = float(content_sim[i, top2_idx])
+        margin = top1_score - top2_score
 
         # Categories within threshold of top-1
-        threshold = top1_score - HYBRID_THRESHOLD
+        threshold = top1_score - config.hybrid_threshold
         within = sorted([
             CATEGORY_NAMES[j]
             for j in range(len(CATEGORY_NAMES))
             if content_sim[i, j] >= threshold
         ])
 
+        gated = top1_score < config.tau_content_score or margin < config.tau_content_margin
+
         row = {
-            "content_primary": CATEGORY_NAMES[top1_idx],
+            "content_primary": None if gated else CATEGORY_NAMES[top1_idx],
             "content_primary_score": top1_score,
             "content_secondary": CATEGORY_NAMES[top2_idx],
-            "content_secondary_score": float(content_sim[i, top2_idx]),
-            "content_margin": float(content_sim[i, top1_idx] - content_sim[i, top2_idx]),
+            "content_secondary_score": top2_score,
+            "content_margin": margin,
             "hybrid_score": len(within),
             "categories_within_threshold": "+".join(within),
         }
@@ -515,6 +657,16 @@ def classify_by_content(
 # ============================================================================
 # Signal Combination
 # ============================================================================
+
+def _coerce_str_or_none(value) -> Optional[str]:
+    """Treat NaN / None / empty string as None; otherwise return str(value)."""
+    if value is None:
+        return None
+    if isinstance(value, float) and pd.isna(value):
+        return None
+    s = str(value)
+    return s if s else None
+
 
 def _normalize_category(category: Optional[str]) -> Optional[str]:
     """Normalize artifact_category from JSON configs to template category names.
@@ -533,28 +685,69 @@ def combine_signals(
     tool_signal: pd.DataFrame,
     path_signal: pd.DataFrame,
     content_signal: pd.DataFrame,
+    config: ScoringConfig = DEFAULT_CONFIG,
 ) -> List[FileClassification]:
     """Combine three classification signals into per-file classifications.
 
-    Priority for assigned_category:
-    1. If tool_category is known and maps to a template category, use it
-    2. If path and content agree, use the agreed category
-    3. Use content_primary (content signal is richest)
+    Files matching the boilerplate predicate are dropped up front when
+    `config.filter_boilerplate` is set (defensive — the primary drop happens
+    earlier in `score_from_output_dir`). The same pattern applies to
+    `config.ignore_doc_folders`: when enabled, files inside a
+    doc/docs/documentation path segment are dropped up front (defensive —
+    primary drop in `score_from_output_dir`).
+
+    Priority chain for `assigned_category` (first match wins):
+    1. `tool_category`, if it maps to a leveled template category.
+    2. `content_primary`, when both content and path signals are non-gated
+       and agree (`signals_agree`).
+    3. Both signals non-gated but disagreeing:
+         - if `config.cross_level_disagreement_demote` is on AND the
+           categories live at different maturity levels → pick the
+           LOWER-level category (conservative variant).
+         - otherwise → prefer `content_primary` (richer signal).
+    4. `content_primary` alone (path gated or missing).
+    5. `path_primary` alone (content gated or missing).
+    Files matching none of the above get no `assigned_category` and
+    contribute no level evidence downstream.
+
+    Also populated on each FileClassification: `signals_agree`,
+    `assigned_maturity_level` (from CATEGORY_TO_LEVEL), `hybrid_score`,
+    `categories_within_threshold`, and per-category `content_scores`.
 
     Args:
         artifacts_df: DataFrame with file_id, artifact_path, tool_name, discovery_step.
         tool_signal: DataFrame with file_id, tool_category.
         path_signal: DataFrame with path_primary, path_primary_score, etc.
-        content_signal: DataFrame with content_primary, content_primary_score, etc.
+        content_signal: DataFrame with content_primary, content_primary_score,
+            categories_within_threshold, hybrid_score, content_{cat} columns.
+        config: ScoringConfig — controls boilerplate filtering and the
+            cross-level disagreement demote rule.
 
     Returns:
-        List of FileClassification objects.
+        List of FileClassification objects (one per surviving input row).
     """
     classifications = []
 
     for i in range(len(artifacts_df)):
         row = artifacts_df.iloc[i]
         file_id = str(row.get("file_id", f"file_{i}"))
+
+        # Defensive boilerplate filter — primary drop happens earlier in
+        # score_from_output_dir; this catches direct callers (e.g. notebooks
+        # running classify_*/combine_signals manually for sensitivity work)
+        # so the filter cannot be silently bypassed. Disable via
+        # config.filter_boilerplate=False for diagnostics on raw input.
+        if config.filter_boilerplate and is_boilerplate(
+            str(row.get("artifact_name", "") or ""),
+            str(row.get("artifact_path", "") or ""),
+        ):
+            continue
+
+        # Defensive doc-folder filter — same shape as the boilerplate one.
+        if config.ignore_doc_folders and is_in_doc_folder(
+            str(row.get("artifact_path", "") or "")
+        ):
+            continue
 
         fc = FileClassification(
             file_id=file_id,
@@ -571,26 +764,27 @@ def combine_signals(
         # Content signal
         if i < len(content_signal):
             cs = content_signal.iloc[i]
-            fc.content_primary = cs.get("content_primary")
+            fc.content_primary = _coerce_str_or_none(cs.get("content_primary"))
             fc.content_primary_score = float(cs.get("content_primary_score", 0))
-            fc.content_secondary = cs.get("content_secondary")
+            fc.content_secondary = _coerce_str_or_none(cs.get("content_secondary"))
             fc.content_secondary_score = float(cs.get("content_secondary_score", 0))
             fc.hybrid_score = int(cs.get("hybrid_score", 1))
             cats_str = cs.get("categories_within_threshold", "")
+            cats_str = "" if cats_str is None or (isinstance(cats_str, float) and pd.isna(cats_str)) else cats_str
             fc.categories_within_threshold = cats_str.split("+") if cats_str else []
 
             # Collect per-category content scores
             for cat in CATEGORY_NAMES:
                 score = cs.get(f"content_{cat}")
-                if score is not None:
+                if score is not None and not (isinstance(score, float) and pd.isna(score)):
                     fc.content_scores[cat] = float(score)
 
         # Path signal
         if i < len(path_signal):
             ps = path_signal.iloc[i]
-            fc.path_primary = ps.get("path_primary")
+            fc.path_primary = _coerce_str_or_none(ps.get("path_primary"))
             fc.path_primary_score = float(ps.get("path_primary_score", 0))
-            fc.path_secondary = ps.get("path_secondary")
+            fc.path_secondary = _coerce_str_or_none(ps.get("path_secondary"))
             fc.path_secondary_score = float(ps.get("path_secondary_score", 0))
 
         # Signal agreement
@@ -600,11 +794,26 @@ def combine_signals(
             and fc.content_primary == fc.path_primary
         )
 
-        # Determine assigned category
+        # Effective per-signal levels (None when gated or non-leveled, e.g. general-documentation)
+        cp_level = CATEGORY_TO_LEVEL.get(fc.content_primary) if fc.content_primary else None
+        pp_level = CATEGORY_TO_LEVEL.get(fc.path_primary) if fc.path_primary else None
+
+        # Determine assigned category — priority chain unchanged for tool / agreement / single-signal,
+        # but content+path disagreement is resolved by config.cross_level_disagreement_demote.
         if fc.tool_category and fc.tool_category in CATEGORY_TO_LEVEL:
             fc.assigned_category = fc.tool_category
         elif fc.signals_agree and fc.content_primary:
             fc.assigned_category = fc.content_primary
+        elif fc.content_primary and fc.path_primary:
+            # Both gates passed; categories disagree.
+            if (config.cross_level_disagreement_demote
+                    and cp_level is not None and pp_level is not None
+                    and cp_level != pp_level):
+                # Cross-level disagreement → keep the LOWER-level category.
+                fc.assigned_category = fc.content_primary if cp_level < pp_level else fc.path_primary
+            else:
+                # Same-level disagreement, or one side has no level mapping → prefer content (richer signal).
+                fc.assigned_category = fc.content_primary
         elif fc.content_primary:
             fc.assigned_category = fc.content_primary
         elif fc.path_primary:
@@ -761,6 +970,9 @@ def _compute_confidence(
 
 def aggregate_repo_maturity(
     file_classifications: List[FileClassification],
+    boilerplate_filtered: int = 0,
+    doc_folder_filtered: int = 0,
+    config: ScoringConfig = DEFAULT_CONFIG,
 ) -> MaturityScore:
     """Compute repository-level maturity score from per-file classifications.
 
@@ -768,8 +980,16 @@ def aggregate_repo_maturity(
     confirmed primary artifact. Coherence flags note when higher levels
     exist without lower-level foundations.
 
+    With config.strict_cap_to_l1_without_tool_attribution = True (default),
+    the level is capped at L1 unless at least one file's tool_category
+    resolved to a leveled template via Artifacts/*.json — semantic
+    evidence alone cannot promote a repo above L1.
+
     Args:
         file_classifications: List of FileClassification objects.
+        boilerplate_filtered: Count of files dropped by the boilerplate filter.
+        doc_folder_filtered: Count of files dropped by the doc-folder filter.
+        config: Scoring config (controls the strict cap and demote lever).
 
     Returns:
         MaturityScore object.
@@ -786,7 +1006,8 @@ def aggregate_repo_maturity(
                            4: {"primary": 0, "secondary": 0}},
             category_counts={cat: 0 for cat in CATEGORY_NAMES},
             coherence_flags=[],
-            recommendations=["No AI artifacts detected. Consider starting with a rules file (e.g., CLAUDE.md, .cursorrules)."],
+            boilerplate_filtered=boilerplate_filtered,
+            doc_folder_filtered=doc_folder_filtered,
         )
 
     # Count primary evidence per level
@@ -813,6 +1034,15 @@ def aggregate_repo_maturity(
         if fc.tool_name and fc.tool_name != "unknown"
     ))
 
+    # True if at least one file's tool_category resolved to a leveled
+    # template (i.e., tool detection produced real level evidence — not
+    # just a tool_name from a config-folder discovery). Used by the
+    # downstream "strict" evaluation profile in notebook 8.
+    has_leveled_tool_attribution = any(
+        fc.tool_category and fc.tool_category in CATEGORY_TO_LEVEL
+        for fc in file_classifications
+    )
+
     # Determine highest level with ≥1 primary artifact
     if level_primary.get(4, 0) > 0:
         overall_level = 4
@@ -821,6 +1051,13 @@ def aggregate_repo_maturity(
     elif level_primary.get(2, 0) > 0:
         overall_level = 2
     else:
+        overall_level = 1
+
+    # Strict cap: repo can only stand above L1 if at least one file has
+    # a leveled tool-category attribution (real AI tool config detected
+    # via Artifacts/*.json). Semantic evidence alone cannot promote.
+    if (config.strict_cap_to_l1_without_tool_attribution
+            and not has_leveled_tool_attribution):
         overall_level = 1
 
     # Coherence checks
@@ -834,12 +1071,6 @@ def aggregate_repo_maturity(
     # Confidence
     confidence = _compute_confidence(
         overall_level, total, agreement_rate, coherence_flags,
-    )
-
-    # Recommendations
-    recommendations = _generate_recommendations(
-        overall_level, level_primary, level_secondary,
-        coherence_flags, category_counts,
     )
 
     # Level evidence dict
@@ -862,76 +1093,11 @@ def aggregate_repo_maturity(
         level_evidence=level_evidence,
         category_counts=category_counts,
         coherence_flags=coherence_flags,
-        recommendations=recommendations,
         file_classifications=fc_df,
+        boilerplate_filtered=boilerplate_filtered,
+        doc_folder_filtered=doc_folder_filtered,
+        has_leveled_tool_attribution=has_leveled_tool_attribution,
     )
-
-
-def _generate_recommendations(
-    overall_level: int,
-    level_primary: Dict[int, int],
-    level_secondary: Dict[int, int],
-    coherence_flags: List[CoherenceFlag],
-    category_counts: Dict[str, int],
-) -> List[str]:
-    """Generate actionable recommendations based on the maturity assessment."""
-    recs = []
-
-    if overall_level == 1:
-        recs.append(
-            "Start with a rules/instructions file (CLAUDE.md, .cursorrules, copilot-instructions.md) "
-            "to ground AI tools in project-specific context."
-        )
-        return recs
-
-    # Red coherence flags → immediate recommendations
-    for flag in coherence_flags:
-        if flag.status == "red" and "L3 without L2" in flag.check:
-            recs.append(
-                "Add standalone grounding files (rules, configuration, architecture docs) "
-                "to provide L2 foundation for your L3 agent artifacts."
-            )
-        if flag.status == "red" and "L4 without L3" in flag.check:
-            recs.append(
-                "Add agent definitions (L3) before scaling to orchestration (L4). "
-                "Agents provide the building blocks that flows coordinate."
-            )
-
-    # Yellow flags
-    for flag in coherence_flags:
-        if flag.status == "yellow" and "L2 foundation" in flag.check:
-            recs.append(
-                "L2 grounding is embedded inside other files. Consider extracting "
-                "shared rules into dedicated CLAUDE.md or .cursorrules for maintainability."
-            )
-
-    # Level-specific advancement suggestions
-    if overall_level == 2:
-        if category_counts.get("agents", 0) == 0 and category_counts.get("commands", 0) == 0:
-            recs.append(
-                "Advance to L3 by adding agent definitions or reusable commands "
-                "that enable autonomous AI behaviors."
-            )
-    elif overall_level == 3:
-        if level_primary.get(4, 0) == 0:
-            recs.append(
-                "Advance to L4 by creating workflow orchestration files (flows) "
-                "that coordinate multiple agents through complex tasks."
-            )
-
-    # Category concentration warning
-    total = sum(category_counts.values())
-    if total > 0:
-        max_cat_count = max(category_counts.values())
-        concentration = max_cat_count / total
-        if concentration > 0.8 and total >= 5:
-            dominant = max(category_counts, key=category_counts.get)
-            recs.append(
-                f"Artifact adoption is concentrated in '{dominant}' ({max_cat_count}/{total}). "
-                f"Consider diversifying across categories for deeper AI integration."
-            )
-
-    return recs
 
 
 # ============================================================================
@@ -967,7 +1133,9 @@ def build_artifacts_map(
             1 for fc in file_classifications
             if fc.path_primary == cat and fc.content_primary == cat
         )
-        level = int(CATEGORY_TO_LEVEL[cat])
+        # general-documentation has no level (it's the absorbing/unclassified bucket).
+        level_enum = CATEGORY_TO_LEVEL.get(cat)
+        level = int(level_enum) if level_enum is not None else None
 
         rows.append({
             "category": cat,
@@ -1053,12 +1221,131 @@ def generate_report(score: MaturityScore) -> dict:
 # Main Entry Point
 # ============================================================================
 
+def load_llm_overlay(
+    labels_csv: str,
+    anomalies_csv: Optional[str] = None,
+) -> Dict[tuple, dict]:
+    """Load LLM-as-judge labels into a `(repo, file_path, blob_hash) → entry` dict.
+
+    Used by `score_from_output_dir` when called with `llm_overlay=...`. The
+    returned dict is keyed by `(repo, file_path, blob_hash)` so that the
+    same content blob across multiple snapshots resolves to a single label
+    (matching the dedup done in `labeling_universe.parquet`).
+
+    Entry shape:
+        Success (file labeled):
+            {"category": str, "rationale": str, "cut": False, "cut_reason": None}
+        Anomaly (file could not be labeled — missing clone, binary blob, etc.):
+            {"category": None, "rationale": None,
+             "cut": True, "cut_reason": "anomaly_<reason>"}
+
+    Args:
+        labels_csv: Path to llm_prelabels_full_universe_*.csv produced by
+            `sampling/label_full_universe.py`. Required columns:
+            repo, file_path, blob_hash, llm_suggested_category, llm_rationale.
+        anomalies_csv: Optional path to the companion anomalies CSV
+            (llm_prelabels_full_universe_anomalies.csv). When provided,
+            anomaly rows are merged in so the scorer can record a specific
+            cut_reason instead of the generic `not_in_llm_csv`.
+
+    Returns:
+        Dict[(repo, file_path, blob_hash), entry].
+    """
+    overlay: Dict[tuple, dict] = {}
+    labels = pd.read_csv(labels_csv, dtype={"blob_hash": str})
+    # Keep only rows with a real category (drop pure error rows).
+    labels = labels[labels["llm_suggested_category"].notna()
+                    & (labels["llm_suggested_category"].astype(str).str.len() > 0)]
+    for r in labels.itertuples(index=False):
+        key = (r.repo, r.file_path, r.blob_hash)
+        overlay[key] = {
+            "category": r.llm_suggested_category,
+            "rationale": getattr(r, "llm_rationale", None),
+            "cut": False,
+            "cut_reason": None,
+        }
+    if anomalies_csv:
+        anoms = pd.read_csv(anomalies_csv, dtype={"blob_hash": str})
+        for r in anoms.itertuples(index=False):
+            key = (r.repo, r.file_path, r.blob_hash)
+            # Don't clobber a successful label with an anomaly entry (shouldn't
+            # happen, but be defensive — labels CSV wins).
+            if key in overlay:
+                continue
+            overlay[key] = {
+                "category": None,
+                "rationale": None,
+                "cut": True,
+                "cut_reason": f"anomaly_{getattr(r, 'anomaly', 'unknown')}",
+            }
+    return overlay
+
+
+def _apply_llm_overlay(
+    classifications: List[FileClassification],
+    repo: str,
+    snapshot: str,
+    overlay: Dict[tuple, dict],
+    blob_hash_for_files: Dict[tuple, str],
+) -> None:
+    """Mutate FileClassification list in place: replace AIME's assigned_category
+    with the LLM verdict, or mark the row as cut.
+
+    Cut reasons:
+        no_blob_hash   — (repo, snapshot, file_path) missing from
+                         blob_hash_for_files (couldn't resolve git blob).
+        not_in_llm_csv — blob hash resolved, but no LLM label or anomaly
+                         record exists for it (labeling not yet run).
+        anomaly_<reason> — blob hash resolved and the anomalies CSV recorded
+                           a specific reason (clone_missing, blob_missing,
+                           binary, hash_mismatch).
+    """
+    for fc in classifications:
+        fc.aime_assigned_category = fc.assigned_category
+        blob_hash = blob_hash_for_files.get((repo, snapshot, fc.artifact_path))
+        fc.blob_hash = blob_hash
+        if blob_hash is None:
+            fc.assigned_category = None
+            fc.assigned_maturity_level = None
+            fc.llm_cut = True
+            fc.llm_cut_reason = "no_blob_hash"
+            continue
+        entry = overlay.get((repo, fc.artifact_path, blob_hash))
+        if entry is None:
+            fc.assigned_category = None
+            fc.assigned_maturity_level = None
+            fc.llm_cut = True
+            fc.llm_cut_reason = "not_in_llm_csv"
+            continue
+        if entry["cut"]:
+            fc.assigned_category = None
+            fc.assigned_maturity_level = None
+            fc.llm_cut = True
+            fc.llm_cut_reason = entry["cut_reason"]
+            fc.llm_rationale = entry["rationale"]
+            continue
+        fc.assigned_category = entry["category"]
+        fc.assigned_maturity_level = (
+            int(CATEGORY_TO_LEVEL[entry["category"]])
+            if entry["category"] in CATEGORY_TO_LEVEL else None
+        )
+        fc.llm_rationale = entry["rationale"]
+        fc.llm_cut = False
+        fc.llm_cut_reason = None
+
+
 def score_from_output_dir(
     output_path: str,
     repo_name: str,
     model,
     artifacts_dir: str = "Artifacts",
     task_prefix: str = DEFAULT_TASK_PREFIX,
+    config: ScoringConfig = DEFAULT_CONFIG,
+    llm_overlay: Optional[Dict[tuple, dict]] = None,
+    blob_hash_for_files: Optional[Dict[tuple, str]] = None,
+    overlay_repo: Optional[str] = None,
+    overlay_snapshot: Optional[str] = None,
+    wl_steps: Optional[set] = None,
 ) -> MaturityScore:
     """Score a single repository from its output directory.
 
@@ -1071,6 +1358,25 @@ def score_from_output_dir(
         model: Loaded SentenceTransformer model.
         artifacts_dir: Path to the Artifacts/ directory.
         task_prefix: Task prefix for nomic models.
+        config: Scoring thresholds for content / path semantic signals.
+        llm_overlay: Optional dict from `load_llm_overlay()`. When provided
+            together with `blob_hash_for_files`, the AIME `assigned_category`
+            is replaced by the LLM verdict (`aime_assigned_category` preserves
+            the original). Files without an LLM label are marked `llm_cut=True`
+            with a `llm_cut_reason`. Default None → unchanged AIME behavior.
+        blob_hash_for_files: Optional dict `(repo, snapshot, file_path) → blob_hash`
+            used to look up LLM labels. Required when `llm_overlay` is set.
+        overlay_repo: The repo name used as the first element of the
+            `blob_hash_for_files` and `llm_overlay` keys. Defaults to
+            `Path(output_path).name` (matches the MSRC layout where
+            output_path is `.../msrc/<repo>` and repo_name is the snapshot).
+        overlay_snapshot: The snapshot used as the second element of
+            `blob_hash_for_files` keys. Defaults to `repo_name`.
+        wl_steps: Optional whitelist of `discovery_step` values. When set,
+            only files whose discovery_step is in this set are classified
+            (e.g. the strict AI-artifact tiers {"tool_standard",
+            "shared_in_tool_folder", "shared_in_root"} from notebooks 13/14).
+            Default None → all discovered files, unchanged behavior.
 
     Returns:
         MaturityScore object.
@@ -1091,10 +1397,44 @@ def score_from_output_dir(
                            4: {"primary": 0, "secondary": 0}},
             category_counts={cat: 0 for cat in CATEGORY_NAMES},
             coherence_flags=[],
-            recommendations=["No artifact data found for this repository."],
         )
 
     artifacts_df = pd.read_csv(csv_files[0])
+
+    # Restrict to whitelisted discovery tiers before any classification —
+    # dropped rows must contribute no level evidence.
+    if wl_steps is not None and not artifacts_df.empty:
+        artifacts_df = artifacts_df[
+            artifacts_df["discovery_step"].isin(wl_steps)
+        ].reset_index(drop=True)
+
+    # Drop project-boilerplate files (README, LICENSE, PR/issue templates, …)
+    # before classification — they are not AI artifacts and cause spurious
+    # level attribution via cosine noise. Gated by config.filter_boilerplate
+    # so sensitivity analyses can opt out and inspect the unfiltered input.
+    boilerplate_filtered = 0
+    if config.filter_boilerplate and not artifacts_df.empty:
+        mask = artifacts_df.apply(
+            lambda r: not is_boilerplate(
+                str(r.get("artifact_name", "") or ""),
+                str(r.get("artifact_path", "") or ""),
+                Path(artifacts_dir),
+            ),
+            axis=1,
+        )
+        boilerplate_filtered = int((~mask).sum())
+        artifacts_df = artifacts_df[mask].reset_index(drop=True)
+
+    # Drop files inside doc/docs/documentation trees before classification —
+    # gated by config.ignore_doc_folders, on by default. See ScoringConfig
+    # docstring for the empirical motivation.
+    doc_folder_filtered = 0
+    if config.ignore_doc_folders and not artifacts_df.empty:
+        mask = artifacts_df["artifact_path"].fillna("").apply(
+            lambda p: not is_in_doc_folder(str(p))
+        )
+        doc_folder_filtered = int((~mask).sum())
+        artifacts_df = artifacts_df[mask].reset_index(drop=True)
 
     # Load embeddings PKL
     pkl_files = list(repo_dir.glob("*_embeddings.pkl"))
@@ -1115,7 +1455,7 @@ def score_from_output_dir(
     # Signal 2: Path semantic intent
     path_signal = classify_by_path(
         artifacts_df["artifact_path"].tolist(),
-        model, template_embeddings, task_prefix,
+        model, template_embeddings, task_prefix, config,
     )
 
     # Signal 3: Content semantic classification
@@ -1137,10 +1477,13 @@ def score_from_output_dir(
                 dim = file_embeddings.shape[1] if file_embeddings.ndim == 2 else 768
                 aligned_embeddings.append(np.zeros(dim))
 
-        aligned_emb_array = np.vstack(aligned_embeddings)
-        content_signal = classify_by_content(aligned_emb_array, template_embeddings)
+        if aligned_embeddings:
+            aligned_emb_array = np.vstack(aligned_embeddings)
+            content_signal = classify_by_content(aligned_emb_array, template_embeddings, config)
+        else:
+            content_signal = classify_by_content(np.array([]).reshape(0, 768), template_embeddings, config)
     else:
-        content_signal = classify_by_content(np.array([]).reshape(0, 768), template_embeddings)
+        content_signal = classify_by_content(np.array([]).reshape(0, 768), template_embeddings, config)
         # Pad with empty rows to match artifacts_df
         empty_rows = []
         for _ in range(len(artifacts_df)):
@@ -1160,8 +1503,126 @@ def score_from_output_dir(
 
     # Combine signals
     classifications = combine_signals(
-        artifacts_df, tool_signal, path_signal, content_signal,
+        artifacts_df, tool_signal, path_signal, content_signal, config,
     )
 
+    # Apply LLM overlay if provided. Replaces AIME's assigned_category with
+    # the LLM verdict (preserving the AIME label as aime_assigned_category)
+    # and marks files without an LLM label as llm_cut. Both llm_overlay
+    # and blob_hash_for_files must be passed together; either alone is a
+    # configuration error.
+    if (llm_overlay is not None) ^ (blob_hash_for_files is not None):
+        raise ValueError(
+            "llm_overlay and blob_hash_for_files must be provided together "
+            "(got one without the other)."
+        )
+    if llm_overlay is not None and blob_hash_for_files is not None:
+        repo_for_overlay = overlay_repo or Path(output_path).name
+        snap_for_overlay = overlay_snapshot or repo_name
+        _apply_llm_overlay(
+            classifications,
+            repo_for_overlay,
+            snap_for_overlay,
+            llm_overlay,
+            blob_hash_for_files,
+        )
+
     # Aggregate to repo-level score
-    return aggregate_repo_maturity(classifications)
+    return aggregate_repo_maturity(
+        classifications,
+        boilerplate_filtered=boilerplate_filtered,
+        doc_folder_filtered=doc_folder_filtered,
+        config=config,
+    )
+
+
+def normalize_timeseries_appearance(
+    df: pd.DataFrame,
+    msrc_root: Path,
+    snapshots: List[str],
+) -> pd.DataFrame:
+    """Enforce first-appearance semantics on a (repo, month) maturity timeseries.
+
+    Three row classes emerge in the output:
+      - NA rows (level=NaN, label="Repo Didn't Exist") for (repo, month) pairs
+        where month is strictly before the repo's first appearance — i.e. the
+        first snapshot for which `{repo}_file_artifacts.csv` exists under
+        msrc_root. These replace the phantom-L1 rows the scoring loops emit
+        when a snapshot directory is absent.
+      - L1 rows backfilled for repos that exist in msrc_root but are entirely
+        absent from `df` — typically repos where every collected artifact was
+        removed by the AIME boilerplate / doc-folder pre-filter and therefore
+        never produced a scored row.
+      - Existing rows from `df` for (repo, month) pairs at or after first
+        appearance, kept verbatim.
+
+    Repos that have never produced a file_artifacts.csv (collector never
+    succeeded on any snapshot) are dropped entirely — there is no signal that
+    the repo ever existed during the study window.
+
+    The returned frame has one row per (repo, snapshot) for every MSRC repo
+    that appeared at least once, with `level` cast to nullable Int64 so the
+    NA rows survive CSV serialization as empty cells.
+    """
+    msrc_root = Path(msrc_root)
+    repos = sorted(p.name for p in msrc_root.iterdir() if p.is_dir())
+
+    appearance: Dict[str, Optional[str]] = {}
+    for repo in repos:
+        first = None
+        for s in snapshots:
+            if (msrc_root / repo / s / f"{repo}_file_artifacts.csv").exists():
+                first = s
+                break
+        appearance[repo] = first
+
+    existing = {
+        (str(r["repo"]), str(r["month"])): r.to_dict()
+        for _, r in df.iterrows()
+    }
+    payload_cols = [c for c in df.columns if c not in ("repo", "month")]
+
+    l1_defaults = {
+        "level": 1,
+        "label": MATURITY_LABELS[MaturityLevel.L1],
+        "confidence": 1.0,
+        "artifacts": 0,
+        "tools": "",
+        "l2_primary": 0,
+        "l3_primary": 0,
+        "l4_primary": 0,
+        "has_leveled_tool_attribution": False,
+        "_note": "no AI artifacts (all filtered or absent)",
+    }
+    na_defaults = {
+        "level": pd.NA,
+        "label": "Repo Didn't Exist",
+        "_note": "repo did not exist at this snapshot",
+    }
+
+    def _row(repo: str, snap: str, defaults: Dict) -> Dict:
+        row = {c: pd.NA for c in payload_cols}
+        row["repo"] = repo
+        row["month"] = snap
+        for k, v in defaults.items():
+            if k in row:
+                row[k] = v
+        return row
+
+    out_rows: List[Dict] = []
+    for repo in repos:
+        first_seen = appearance[repo]
+        if first_seen is None:
+            continue
+        for snap in snapshots:
+            if snap < first_seen:
+                out_rows.append(_row(repo, snap, na_defaults))
+            elif (repo, snap) in existing:
+                out_rows.append(existing[(repo, snap)])
+            else:
+                out_rows.append(_row(repo, snap, l1_defaults))
+
+    out = pd.DataFrame(out_rows, columns=list(df.columns))
+    if "level" in out.columns:
+        out["level"] = pd.to_numeric(out["level"], errors="coerce").astype("Int64")
+    return out.sort_values(["repo", "month"]).reset_index(drop=True)

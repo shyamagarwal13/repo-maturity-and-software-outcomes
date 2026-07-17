@@ -25,3 +25,17 @@ Intentionally left unchanged for functionality:
 - artifact definition JSON files in `Artifacts/`
 - generic provider URLs, API examples, and test fixtures that are operational or explanatory rather than identifying
 - optional external API hooks used by some notebook-driven report generation steps
+
+## Refresh update
+
+The Study 1 analyzer was refreshed to match the revised analysis (see
+`study1/CHANGES_SINCE_SUBMISSION.md`). The same sanitization discipline was applied to all
+updated and newly added files:
+
+- notebook outputs, execution counts, and widget/runtime metadata were cleared from every
+  updated pipeline notebook and every newly added research notebook (`RQ1`–`RQ3`)
+- hardcoded local filesystem paths, working-directory names, and run-name stamps introduced
+  by the refreshed notebooks were replaced with package-relative placeholders and the
+  standard `example-run` organization placeholder
+- no repository cohort, private inputs, embeddings, scores, or other derived data were added;
+  data directories remain empty by design

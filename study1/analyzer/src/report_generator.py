@@ -11,7 +11,7 @@ import platform
 import re
 import subprocess
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import plotly.graph_objects as go
 from jinja2 import Template
@@ -22,6 +22,90 @@ from src.maturity_scorer import (
     MaturityLevel,
     MaturityScore,
 )
+
+
+# ============================================================================
+# Recommendations (prescriptive narrative — moved out of MaturityScore)
+# ============================================================================
+
+def generate_recommendations(score: MaturityScore) -> List[str]:
+    """Actionable recommendations derived from a MaturityScore.
+
+    Lives here, not in MaturityScore, because recommendations are a
+    presentation concern: prescriptive narrative consumed by the report,
+    not descriptive evidence used by analysis. The score class stays
+    focused on the assessment; this function is the report's view.
+    """
+    recs: List[str] = []
+    overall_level = score.overall_level
+    coherence_flags = score.coherence_flags
+    category_counts = score.category_counts
+    level_primary = {
+        lvl: score.level_evidence.get(lvl, {}).get("primary", 0)
+        for lvl in (2, 3, 4)
+    }
+
+    if overall_level == 1:
+        if score.artifact_count == 0:
+            recs.append(
+                "No AI artifacts detected. Consider starting with a rules file "
+                "(e.g., CLAUDE.md, .cursorrules)."
+            )
+        else:
+            recs.append(
+                "Start with a rules/instructions file (CLAUDE.md, .cursorrules, "
+                "copilot-instructions.md) to ground AI tools in project-specific context."
+            )
+        return recs
+
+    # Red coherence flags → immediate recommendations
+    for flag in coherence_flags:
+        if flag.status == "red" and "L3 without L2" in flag.check:
+            recs.append(
+                "Add standalone grounding files (rules, configuration, architecture docs) "
+                "to provide L2 foundation for your L3 agent artifacts."
+            )
+        if flag.status == "red" and "L4 without L3" in flag.check:
+            recs.append(
+                "Add agent definitions (L3) before scaling to orchestration (L4). "
+                "Agents provide the building blocks that flows coordinate."
+            )
+
+    # Yellow flags
+    for flag in coherence_flags:
+        if flag.status == "yellow" and "L2 foundation" in flag.check:
+            recs.append(
+                "L2 grounding is embedded inside other files. Consider extracting "
+                "shared rules into dedicated CLAUDE.md or .cursorrules for maintainability."
+            )
+
+    # Level-specific advancement suggestions
+    if overall_level == 2:
+        if category_counts.get("agents", 0) == 0 and category_counts.get("commands", 0) == 0:
+            recs.append(
+                "Advance to L3 by adding agent definitions or reusable commands "
+                "that enable autonomous AI behaviors."
+            )
+    elif overall_level == 3:
+        if level_primary.get(4, 0) == 0:
+            recs.append(
+                "Advance to L4 by creating workflow orchestration files (flows) "
+                "that coordinate multiple agents through complex tasks."
+            )
+
+    # Category concentration warning
+    total = sum(category_counts.values())
+    if total > 0:
+        max_cat_count = max(category_counts.values())
+        concentration = max_cat_count / total
+        if concentration > 0.8 and total >= 5:
+            dominant = max(category_counts, key=category_counts.get)
+            recs.append(
+                f"Artifact adoption is concentrated in '{dominant}' ({max_cat_count}/{total}). "
+                f"Consider diversifying across categories for deeper AI integration."
+            )
+
+    return recs
 
 
 # ============================================================================
@@ -322,7 +406,7 @@ REPORT_TEMPLATE_HTML = """<!DOCTYPE html>
 {# ======== PAGE 1: TITLE ======== #}
 <div class="title-page">
     <h1>AI Adoption Maturity Assessment</h1>
-    <div class="subtitle">AIME Framework</div>
+    <div class="subtitle">AIME Framework &mdash; Stanford AI Practices Benchmark</div>
     <div style="margin: 30px 0;">
         <div style="font-size: 14pt; color: #6b7280;">Repository</div>
         <div style="font-size: 20pt; font-weight: bold; color: #111827;">{{ repo_name }}</div>
@@ -350,7 +434,8 @@ REPORT_TEMPLATE_HTML = """<!DOCTYPE html>
     <h3>What is this document?</h3>
     <p>
         This report assesses a code repository's AI tool adoption maturity using the
-        <strong>AIME</strong> (AI Adoption Maturity Evaluator) framework. It analyzes
+        <strong>AIME</strong> (AI Adoption Maturity Evaluator) framework, developed as part
+        of the <strong>Stanford AI Practices Benchmark</strong> research program. It analyzes
         version-controlled AI configuration files to determine how deeply AI tools are
         integrated into the development workflow.
     </p>
@@ -765,9 +850,9 @@ REPORT_TEMPLATE_HTML = """<!DOCTYPE html>
     {% endfor %}
     {% endif %}
 
-    {% if score.recommendations %}
+    {% if recommendations %}
     <h3>Recommendations</h3>
-    {% for rec in score.recommendations %}
+    {% for rec in recommendations %}
     <div class="recommendation">{{ rec }}</div>
     {% endfor %}
     {% endif %}
@@ -1159,6 +1244,7 @@ def generate_pdf_report(
         llm_report=llm_report,
         llm_report_html=llm_report_html,
         temporal_health=temporal_health,
+        recommendations=generate_recommendations(score),
     )
 
     # Generate PDF — defer weasyprint import so the module loads without pango

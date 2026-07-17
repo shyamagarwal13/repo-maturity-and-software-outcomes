@@ -25,15 +25,27 @@
 2. Confirm that a collection bundle was written under `study1/collector/output/`.
 3. Run the analyzer from `study1/analyzer/`.
    Typical workflow:
-   - launch Jupyter and execute the notebooks in order
+   - launch Jupyter and execute the pipeline notebooks in order
+     (`2` filtration → `4` clustering → `5` interpretation → `6` maturity
+     scoring → `7` organization report)
    - or invoke the analysis modules directly from Python scripts
 4. Review generated intermediate tables, cluster assignments, maturity outputs, and optional report artifacts.
+5. Run the research notebooks under `study1/analyzer/notebooks/research/`
+   (`RQ1_maturity_structure`, `RQ2_robustness`, `RQ3_dynamics`) to reproduce the
+   structure, robustness, and adoption-dynamics analyses.
 
 ## Notes on Missing Inputs
 
 This package does not include the original repository cohort, private repository access tokens, or all intermediate outputs used during the full study workflow.
 
 As a result, a reviewer can inspect the code, run the pipeline on their own accessible repositories, and reproduce the computation pattern, but may not be able to recreate every study-specific result from the submission using public materials alone.
+
+The `research/` notebooks (`RQ1`–`RQ3`) additionally read intermediate tables produced by
+upstream analysis steps that are not all bundled here (for example, the normalized
+timeseries and per-file prediction tables). They are therefore fully **auditable** — every
+computation, threshold, and statistical test is visible in the cells — but are **not
+end-to-end runnable** without those upstream inputs, which derive from the restricted
+repository cohort.
 
 Some notebook sections optionally call external LLM APIs for interpretation or narrative generation. Those sections are not required to inspect the core pipeline and can be skipped if credentials are unavailable.
 

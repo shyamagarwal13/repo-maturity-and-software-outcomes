@@ -13,8 +13,12 @@
 
 - `study1/README.md`: summary of the Study 1 workflow
 - `study1/REPRODUCE_STUDY1.md`: setup and reproduction notes
+- `study1/CHANGES_SINCE_SUBMISSION.md`: summary of the analyzer refresh relative to the initial submission
 - `study1/collector/`: collection code, tests, configs, and artifact definitions
 - `study1/analyzer/`: analysis code, notebooks, tests, configs, and artifact definitions
+  - `analyzer/src/maturity_scorer.py`: multi-signal AI-adoption maturity scoring engine
+  - `analyzer/src/artifact_filtering.py`: boilerplate / documentation pre-filter shared by the filtration notebook and the scorer
+  - `analyzer/notebooks/research/`: research notebooks `RQ1`–`RQ3` (structure, robustness, dynamics)
 
 ## Data
 
