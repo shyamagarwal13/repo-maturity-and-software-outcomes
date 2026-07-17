@@ -1,0 +1,19 @@
+\begin{table}[t]
+\centering
+\caption{File-level agreement with the human reference (n=175 items; McNemar exact p = 1.000; paired-difference bootstrap 95\% CI [-6.7, 9.4] pp).}
+\label{tab:file-level}
+\begin{tabular}{lrr}
+\toprule
+Metric & Embedding (AIME) & Haiku \\
+\midrule
+Accuracy vs reference (Wilson 95\% CI) & 81.7\% [75.3, 86.7] & 81.1\% [74.7, 86.2] \\
+Accuracy, repo-cluster bootstrap 95\% CI & [63.3, 95.6] & [67.5, 90.3] \\
+Cohen's kappa vs reference & 0.743 & 0.739 \\
+Balanced accuracy & 0.514 & 0.548 \\
+Macro F1 (classes with support > 0) & 0.480 & 0.525 \\
+Weighted F1 & 0.808 & 0.823 \\
+Accuracy, majority-vote references (n=47) & 93.6\% & 78.7\% \\
+Accuracy, single-rater references (n=128) & 77.3\% & 82.0\% \\
+\bottomrule
+\end{tabular}
+\end{table}

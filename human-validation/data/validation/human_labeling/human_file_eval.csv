@@ -1,0 +1,11 @@
+category,support_human,precision_embedding,recall_embedding,f1_embedding,precision_haiku,recall_haiku,f1_haiku,low_support
+rules,55,0.82,0.909,0.862,0.846,0.8,0.822,False
+configuration,5,1.0,1.0,1.0,1.0,1.0,1.0,False
+architecture,1,0.0,0.0,0.0,0.0,0.0,0.0,True
+code-style,6,1.0,0.167,0.286,0.5,0.667,0.571,False
+agents,19,1.0,0.632,0.774,1.0,0.632,0.774,False
+commands,73,0.971,0.918,0.944,0.986,0.959,0.972,False
+skills,5,0.0,0.0,0.0,0.0,0.0,0.0,False
+flows,3,0.0,0.0,0.0,0.0,0.0,0.0,True
+session-logs,0,0.0,0.0,0.0,0.0,0.0,0.0,True
+not-artifact,8,0.296,1.0,0.457,0.438,0.875,0.583,False

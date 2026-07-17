@@ -1,0 +1,79 @@
+{
+  "n_repos_dataset": 509,
+  "n_repos_eligible": 268,
+  "n_repos_detected": 392,
+  "kripp_alpha_10": 0.5716145833333333,
+  "kripp_alpha_11raw": 0.5716145833333333,
+  "n_multivote": 67,
+  "fleiss_kappa_triple": 0.8389261744966441,
+  "n_triple": 8,
+  "unanimous_triple": 0.875,
+  "kappa_AB": 0.648711943793911,
+  "n_pair_AB": 25,
+  "agree_AB": 0.76,
+  "kappa_AC": 0.4990825688073395,
+  "n_pair_AC": 39,
+  "agree_AC": 0.6410256410256411,
+  "kappa_BC": 0.8118811881188119,
+  "n_pair_BC": 19,
+  "agree_BC": 0.8947368421052632,
+  "n_no_majority": 20,
+  "acc_embedding": 0.8171428571428572,
+  "acc_embedding_ci": [
+    0.7532688693053585,
+    0.8673920954813578
+  ],
+  "acc_haiku": 0.8114285714285714,
+  "acc_haiku_ci": [
+    0.7470195807155944,
+    0.8624583036245144
+  ],
+  "kappa_vs_human_embedding": 0.7426234028862947,
+  "balacc_embedding": 0.5139049713671199,
+  "macro_f1_embedding": 0.48030906984360744,
+  "weighted_f1_embedding": 0.8078984173593922,
+  "kappa_vs_human_haiku": 0.7389358528095475,
+  "balacc_haiku": 0.5480166359582365,
+  "macro_f1_haiku": 0.5248452868792532,
+  "weighted_f1_haiku": 0.8229187576950184,
+  "mcnemar_p": 1.0,
+  "n_eval": 175,
+  "boot_acc_embedding_ci": [
+    0.6325256909992912,
+    0.9562567934782609
+  ],
+  "boot_acc_haiku_ci": [
+    0.6746917904174838,
+    0.9030837004405287
+  ],
+  "boot_acc_diff_ci": [
+    -0.06666666666666665,
+    0.093526231646262
+  ],
+  "acc_embedding_majority": 0.9361702127659575,
+  "n_ref_majority": 47,
+  "acc_haiku_majority": 0.7872340425531915,
+  "acc_embedding_single": 0.7734375,
+  "n_ref_single": 128,
+  "acc_haiku_single": 0.8203125,
+  "acc_embedding_vs_A": 0.6739130434782609,
+  "acc_haiku_vs_A": 0.6956521739130435,
+  "acc_embedding_vs_B": 0.7674418604651163,
+  "acc_haiku_vs_B": 0.7325581395348837,
+  "acc_embedding_vs_C": 0.8478260869565217,
+  "acc_haiku_vs_C": 0.75,
+  "repo_match_embedding": 0.9714285714285714,
+  "repo_match_haiku": 0.7714285714285715,
+  "repo_off_by_one_embedding": 0.9714285714285714,
+  "repo_qwk_embedding": 0.8292682926829269,
+  "repo_match_embedding_ci": [
+    0.9142857142857143,
+    1.0
+  ],
+  "repo_off_by_one_haiku": 0.9714285714285714,
+  "repo_qwk_haiku": 0.7372013651877133,
+  "repo_match_haiku_ci": [
+    0.6285714285714286,
+    0.9142857142857143
+  ]
+}
