@@ -8,12 +8,12 @@ Study 1 materials are included in `study1/` as two coordinated components:
 
 Study 2 materials are included in this submission build under `study2/`.
 
+Human-labeled validation of the classifier is included under `human-validation/` (self-contained; see its README).
+
 Directory overview:
 - `study1/`: code and documentation for the public portion of Study 1
-- `study2/`: replication materials for Study 2
-- `data/public/`: location for shareable public inputs
-- `data/anonymized/`: location for sanitized or derived outputs
-- `data/placeholders/`: notes for omitted restricted artifacts
+- `study2/`: replication materials for Study 2 (data, scripts, notebook; reproduces the paper's Study 2 results end-to-end)
+- `human-validation/`: human-annotation validation of the classifier (data, evaluation notebook, confusion matrices)
 - `docs/`: package manifest and sanitization record
 
 Some non-public intermediate artifacts, restricted repository inputs, tokens, and environment-specific outputs are intentionally not redistributed in this package.

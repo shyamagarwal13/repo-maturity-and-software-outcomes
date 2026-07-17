@@ -6,7 +6,7 @@
 - `LICENSE_NOTE.md`: licensing and redistribution note for this local review build
 - `study1/`: merged materials for Study 1
 - `study2/`: replication materials for Study 2
-- `data/`: directories for public inputs, anonymized outputs, and omission notes
+- `human-validation/`: human-label validation of the classifier
 - `docs/`: package manifest and sanitization record
 
 ## Study 1
@@ -20,11 +20,19 @@
   - `analyzer/src/artifact_filtering.py`: boilerplate / documentation pre-filter shared by the filtration notebook and the scorer
   - `analyzer/notebooks/research/`: research notebooks `RQ1`–`RQ3` (structure, robustness, dynamics)
 
-## Data
+## Study 2
 
-- `data/public/README.md`: notes for shareable public inputs
-- `data/anonymized/README.md`: notes for sanitized outputs
-- `data/placeholders/README.md`: notes for omitted restricted artifacts
+- `study2/data/`: analysis panel (buildable from the original panel via `scripts/maturity_columns.py`, or used as shipped), maturity labels, matching
+- `study2/scripts/`, `study2/notebooks/`, `study2/run_replication.sh`: end-to-end reproduction of the paper's Study 2 results
+- `study2/results/`, `study2/plots/`: shipped outputs (regenerated exactly by the notebook)
+
+## Human validation
+
+- `human-validation/`: self-contained human-annotation validation of the classifier (labeled data, evaluation notebook, per-category metrics, confusion matrices)
+
+## Data notes
+
+- Study 1's corporate repository inputs and derived per-repository data are restricted by research agreements and are not redistributed; the Study 1 directories contain code, configuration, and notebooks only
 
 ## Docs
 

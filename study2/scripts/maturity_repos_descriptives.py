@@ -2,8 +2,8 @@
 """
 Descriptive stats for repos_with_details.csv by maturity: level 1 vs level 2+ (2,3,4).
 
-Uses repos-file maturity scores (not the MSRC wide sheet used by maturity_columns.py
-since that script switched to wide last-month labels). Reports mean,
+Uses the final maturity labels in data/maturity_levels.csv (the same labels
+maturity_columns.py uses to build the analysis panel). Reports mean,
 median, min, max for numeric columns (including repo age in days from repo_created
 to a reference date, default end of November 2025), plus counts and percentages
 of L1 vs L2+ within agent_first.txt and ide_first.txt.
@@ -12,19 +12,10 @@ of L1 vs L2+ within agent_first.txt and ide_first.txt.
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 import pandas as pd
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
-
-from maturity_columns import (  # noqa: E402
-    _build_full_repo_to_level,
-    _load_full_repo_names,
-)
 
 
 def _parse_reference_timestamp(date_str: str) -> pd.Timestamp:
@@ -143,8 +134,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--maturity-scores",
-        default="../data/repos-file - November 2025_org_maturity_scores.csv",
-        help="Maturity scores CSV (repo, level)",
+        default="../data/maturity_levels.csv",
+        help="Maturity labels CSV (repo_name, maturity_level)",
     )
     parser.add_argument(
         "--agent-first",
@@ -177,18 +168,22 @@ def main() -> None:
     ide_path = (base / args.ide_first).resolve()
 
     df_m = pd.read_csv(maturity_path)
-    full_repo_set = _load_full_repo_names(agent_path, ide_path)
-    full_repo_to_level = _build_full_repo_to_level(df_m, full_repo_set)
+    full_repo_to_level = dict(zip(df_m["repo_name"], df_m["maturity_level"].astype(int)))
 
     df = pd.read_csv(repos_path)
     if "name" not in df.columns:
         raise SystemExit("repos_with_details.csv must have a 'name' column (owner/repo).")
 
     df = df.copy()
-    if "repo_created" not in df.columns:
-        raise SystemExit("repos_with_details.csv must have repo_created for age_days.")
-    ref_ts = _parse_reference_timestamp(args.reference_date)
-    df["age_days"] = _compute_age_days(df["repo_created"], ref_ts)
+    # Age as in the paper's pre-treatment table: the panel's age covariate at the
+    # adoption month (repository age in days when the first agent PR lands).
+    panel = pd.read_csv(Path(base / "../data/panel_event_monthly.csv").resolve(), low_memory=False)
+    age_at_adoption = (
+        panel[(panel["dataset_source"] == "treatment") & (panel["time_to_event"] == 0)]
+        .drop_duplicates("repo_name")
+        .set_index("repo_name")["age"]
+    )
+    df["age_days"] = df["name"].map(age_at_adoption)
 
     df["_maturity_level"] = df["name"].map(lambda x: full_repo_to_level.get(str(x).strip() if pd.notna(x) else ""))
     df_l1 = df[df["_maturity_level"] == 1].copy()
@@ -197,11 +192,8 @@ def main() -> None:
 
     numeric_cols = _numeric_descriptive_columns(df)
 
-    print("Maturity mapping: same rules as maturity_columns.py (agent∪ide full names).")
-    print(
-        f"Repo age (age_days): whole days from repo_created to reference {args.reference_date} (UTC); "
-        f"repos created after reference are excluded (NaN)."
-    )
+    print("Maturity mapping: final labels from data/maturity_levels.csv.")
+    print("Repo age (age_days): panel age covariate at the adoption month.")
     print(f"repos_with_details rows: {len(df)}")
     print(f"  Level 1 (in details table): {len(df_l1)}")
     print(f"  Level 2+ (in details table): {len(df_l2p)}")
