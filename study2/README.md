@@ -6,6 +6,7 @@ This folder contains the replication materials for Study 2 (maturity-stratified 
 
 - `data/`: input datasets used by scripts and notebook
 - `data/panel_event_monthly.csv`: the analysis panel with final RAMP maturity labels (509 of 518 treated repositories accessible at re-collection, plus matched controls); this is the panel the paper's Study 2 results are computed from
+- `data/maturity_levels.csv`: final RAMP level (1-4) per treated repository; input to `scripts/maturity_columns.py`
 - `scripts/maturity_columns.py`: adds maturity/matching flags to the panel
 - `scripts/maturity_repos_descriptives.py`: maturity-level descriptive statistics
 - `notebooks/DiffinDiff.Rmd`: main DiD/event-study analysis notebook
@@ -37,7 +38,11 @@ install.packages(scan("r-packages.txt", what = "character"))
 
 Run from `study2/`:
 
-1) The shipped `data/panel_event_monthly.csv` already carries the maturity/matching flag columns used by the notebook, so no preparation step is required. (`scripts/maturity_columns.py` documents how these flags are constructed from the maturity labels and `matching.csv`.)
+1) Build the analysis panel, or use the shipped one. The panel can be rebuilt from Agarwal et al.'s original panel (`data/panel_event_monthly_original.csv`) plus the maturity labels (`data/maturity_levels.csv`) and matching (`data/matching.csv`); this reproduces the shipped `data/panel_event_monthly.csv` byte-for-byte, so you may equivalently skip this step and use the shipped file directly:
+
+```bash
+python scripts/maturity_columns.py
+```
 
 2) (Optional) Compute descriptive maturity statistics:
 
